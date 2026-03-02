@@ -153,17 +153,17 @@
    {"jsonrpc":"2.0","id":3,"result":{"channels":[{"channel_id":"0xa1cda836a83c0eabf287b150a69c6dfad4be9646c7be5d813e2b10f823363971","is_public":true,"is_acceptor":false,"is_one_way":false,"channel_outpoint":"0x33afc31a3fed0555ba6f5d89a8051024a6fba07590c10353c929cb64820394ff00000000","peer_id":"QmZCfzENZqWrWwifJj9BFDvxQWFyYw5GjdB4vN7Ynd4FxY","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY"},"local_balance":"0x9502f9000","offered_tlc_balance":"0x0","remote_balance":"0x38407b700","received_tlc_balance":"0x0","pending_tlcs":[],"latest_commitment_transaction_hash":"0x7dac79d29c7d4c6e1389b44cae62a6103ec0267ee67821462c72142cfaa404ec","created_at":"0x19caeac41cc","enabled":true,"tlc_expiry_delta":"0xdbba00","tlc_fee_proportional_millionths":"0x3e8","shutdown_transaction_hash":null,"failure_detail":null}]}}
    ```
 
-   **Why is the local_balance 0xa32aef600 (43,800,000,000) and the remote_balance 0x460913c00 (18,800,000,000)?**
+   **Why is the local_balance 0x9502f9000 (40,000,000,000) and the remote_balance 0x38407b700 (15,100,000,000)?**
 
-	This channel was established with nodeA contributing 500 ckb and node1 contributing 250 ckb.
+	This channel was established with nodeA contributing 499 CKB and node1 contributing 250 CKB.
 
-	Since each cell requires a minimum of 62 ckb, this amount is reserved to ensure that there are sufficient funds to cover cell occupancy costs during on-chain settlement (when the channel closes). These 62 ckb will be returned to their respective nodes at the time of on-chain settlement.
+	Each side must reserve 99 CKB (98 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L22">commitment lock occupied capacity</a> + 1 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L18">shutdown transaction fee</a>) to ensure sufficient funds for on-chain settlement when the channel closes. This reserved amount is not available for off-chain payments.
 
 	Actual available funds in the channel:
 
-	nodeA: 500 ckb - 62 ckb = 438 ckb (local_balance is 0xa32aef600)
+	nodeA: 499 CKB - 99 CKB = 400 CKB (local_balance is 0x9502f9000)
 
-	node1: 250 ckb - 62 ckb = 188 ckb (remote_balance is 0x460913c00)
+	node1: 250 CKB - 99 CKB = 151 CKB (remote_balance is 0x38407b700)
 
 
 
@@ -208,11 +208,11 @@
 
 
 
-5. Before nodeA sends the payment, first query the local_balance and remote_balance of each channel
+5. Before sending the payment from nodeA, first query the local_balance and remote_balance of each channel
 
    nodeA ⟺ node1
 
-   As shown in Step 3, the response included: `{"local_balance":"0xa32aef600","remote_balance":"0x460913c00"}`
+   As shown in Step 3, the response included: `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`
 
    node1 ⟺ node2
 
@@ -243,7 +243,7 @@
 
 
 
-6. Send a send_payment request to nodeA to pay node2
+6. Send a send_payment request from nodeA to pay node2
 
    Pass in the previously recorded invoice_address to the `send_payment` request
 
@@ -268,7 +268,7 @@
 
 7. Repeat Steps 4 and 6 two more times
 
-   Performing two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
+   Perform two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
 
 
 
@@ -276,7 +276,7 @@
 
    nodeA ⟺ node1
 
-   Balances changed from`{"local_balance":"0xa32aef600","remote_balance":"0x460913c00"}`to`{"local_balance":"0xa2cb78e60","remote_balance":"0x46688a3a0"}`.
+   Balances changed from`{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`to`{"local_balance":"0x94a3d8260","remote_balance":"0x389f9baa0"}`.
 
    node1 ⟺ node2
 
@@ -290,23 +290,23 @@
 
    - Before payments
 
-     nodeA (43800000000) ⟺ node1 (18800000000)
+     nodeA (40,000,000,000) ⟺ node1 (15,100,000,000)
 
-     node1 (4993800000000) ⟺ node2 (5018800000000)
+     node1 (4,993,800,000,000) ⟺ node2 (5,018,800,000,000)
 
    - After payments
 
-     nodeA (43499700000) ⟺ node1 (19100300000)
+     nodeA (39,699,700,000) ⟺ node1 (15,400,300,000)
 
-     node1 (4993500000000) ⟺ node2 (5019100000000)
+     node1 (4,993,500,000,000) ⟺ node2 (5,019,100,000,000)
 
    Funds changes:
 
-   ​	nodeA: 43499700000 - 43800000000 = -300300000
+   ​	nodeA: 39,699,700,000 - 40,000,000,000 = -300,300,000
 
-   ​	node1: 4993500000000 + 19100300000 - 4993800000000 - 18800000000 = 300000
+   ​	node1: 4,993,500,000,000 + 15,400,300,000 - 4,993,800,000,000 - 15,100,000,000 = 300,000
 
-   ​	node2: 5019100000000 - 5018800000000 = 300000000
+   ​	node2: 5,019,100,000,000 - 5,018,800,000,000 = 300,000,000
 
    **Conclusion: Three CKB payments of 100,000,000 shannon each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000 shannon.**
 
@@ -438,7 +438,7 @@
 
 
 
-5. Before nodeA sends the payment, first query the local_balance and remote_balance of each channel
+5. Before sending the payment from nodeA, first query the local_balance and remote_balance of each channel
 
    nodeA ⟺ node1
 
@@ -468,7 +468,7 @@
 
 
 
-6. Send a send_payment request to nodeA to pay node2
+6. Send a send_payment request from nodeA to pay node2
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
@@ -491,7 +491,7 @@
 
 7. Repeat Steps 4 and 6 two more times
 
-   Performing two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
+   Perform two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
 
 
 
@@ -513,23 +513,23 @@
 
    - Before payments
 
-     nodeA (2000000000) ⟺ node1 (0)
+     nodeA (2,000,000,000) ⟺ node1 (0)
 
-     node1 (99491799995) ⟺ node2 (508200005)
+     node1 (99,491,799,995) ⟺ node2 (508,200,005)
 
    - After payments
 
-     nodeA (1699700000) ⟺ node1 (300300000)
+     nodeA (1,699,700,000) ⟺ node1 (300,300,000)
 
-     node1 (99191799995) ⟺ node2 (808200005)
+     node1 (99,191,799,995) ⟺ node2 (808,200,005)
 
    Funds changes:
 
-   ​	nodeA: 1699700000 - 2000000000 = -300300000
+   ​	nodeA: 1,699,700,000 - 2,000,000,000 = -300,300,000
 
-   ​	node1: 99191799995 + 300300000 - 99491799995 = 300000
+   ​	node1: 99,191,799,995 + 300,300,000 - 99,491,799,995 = 300,000
 
-   ​	node2: 808200005 - 508200005 = 300000000
+   ​	node2: 808,200,005 - 508,200,005 = 300,000,000
 
    **Conclusion: Three UDT payments of 100,000,000 each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000.**
 
