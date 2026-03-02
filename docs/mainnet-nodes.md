@@ -295,7 +295,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
-       "id": 4,
+       "id": 1,
        "jsonrpc": "2.0",
        "method": "new_invoice",
        "params": [
@@ -322,7 +322,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 5,
+       "id": 2,
        "jsonrpc": "2.0",
        "method": "list_channels",
        "params": [
@@ -337,7 +337,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
-       "id": 5,
+       "id": 2,
        "jsonrpc": "2.0",
        "method": "list_channels",
        "params": [
@@ -362,7 +362,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 6,
+       "id": 3,
        "jsonrpc": "2.0",
        "method": "send_payment",
        "params": [
@@ -425,7 +425,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
-       "id": 9,
+       "id": 6,
        "jsonrpc": "2.0",
        "method": "shutdown_channel",
        "params": [
@@ -446,7 +446,7 @@ Since node1 and node2's RPC are not publicly accessible, we can only query balan
 
    ```bash
    curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
-       "id": 9,
+       "id": 6,
        "jsonrpc": "2.0",
        "method": "shutdown_channel",
        "params": [
