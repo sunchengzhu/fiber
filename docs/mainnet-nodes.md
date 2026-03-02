@@ -15,6 +15,22 @@
 
 
 
+## Overview
+
+In this guide, we will deploy two local nodes (nodeA and nodeB) and connect them to the public relay nodes (node1 and node2) to perform multi-hop payments. The overall topology is:
+
+```
+┌───────┐        ┌───────┐        ┌───────┐        ┌───────┐
+│ nodeA │ ─────▶ │ node1 │ ─────▶ │ node2 │ ─────▶ │ nodeB │
+│:8227  │        │public │        │public │        │:8237  │
+└───────┘        └───────┘        └───────┘        └───────┘
+  sender        relay node 1     relay node 2      receiver
+```
+
+In this demo, nodeA and nodeB run on the same machine for convenience. In a real-world scenario, they would be on separate machines, each connecting only to a public relay node. The benefit is that local nodes do not need to expose a publicly reachable address — they can send and receive payments through the public relay nodes.
+
+
+
 ## Local Node Deployment
 
 1. Download fnn
@@ -270,17 +286,7 @@
 
 ## Multi-Hop CKB Payment: nodeA → node1 → node2 → nodeB
 
-Now that both channels are established, we can send a multi-hop payment from nodeA to nodeB through the public nodes. The payment route is:
-
-```
-┌───────┐        ┌───────┐        ┌───────┐        ┌───────┐
-│ nodeA │ ─CKB─▶ │ node1 │ ─CKB─▶ │ node2 │ ─CKB─▶ │ nodeB │
-│:8227  │        │public │        │public │        │:8237  │
-└───────┘        └───────┘        └───────┘        └───────┘
-  sender        relay node 1     relay node 2      receiver
-```
-
-Since node1 and node2's RPC are not publicly accessible, we can only query balance changes on nodeA (port 8227) and nodeB (port 8237). The total fee charged by the intermediate nodes (node1 + node2) can be inferred from the difference.
+Now that both channels are established, we can send a multi-hop payment from nodeA to nodeB through the public nodes (see topology in the [Overview](#overview) section). Since node1 and node2's RPC are not publicly accessible, we can only query balance changes on nodeA (port 8227) and nodeB (port 8237). The total fee charged by the intermediate nodes (node1 + node2) can be inferred from the difference.
 
 
 1. Generate an invoice on nodeB
