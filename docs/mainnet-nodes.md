@@ -180,7 +180,7 @@
 
 	This channel was established with nodeA contributing 499 CKB and node1 contributing 250 CKB.
 
-	Each side must reserve 99 CKB (98 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L22">commitment lock occupied capacity</a> + 1 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L18">shutdown transaction fee</a>) to ensure sufficient funds for on-chain settlement when the channel closes. This reserved amount is not available for off-chain payments.
+	Each side must reserve 99 CKB (98 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L23">commitment lock occupied capacity</a> + 1 CKB for <a href="https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/crates/fiber-lib/src/fiber/config.rs#L18">shutdown transaction fee</a>) to ensure sufficient funds for on-chain settlement when the channel closes. This reserved amount is not available for off-chain payments.
 
 	Actual available funds in the channel:
 
