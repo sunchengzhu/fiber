@@ -36,11 +36,22 @@
    # Create a local node directory named nodeA
    mkdir -p mainnet-fnn/nodeA/ckb
    ./ckb-cli account new
-   ./ckb-cli account export --lock-arg 0xd4cf2823703d170f923549d8efeb34260fc0f3ba --extended-privkey-path exported-key
-   head -n 1 ./exported-key > mainnet-fnn/nodeA/ckb/key
+   ./ckb-cli account export --lock-arg 0xd4cf2823703d170f923549d8efeb34260fc0f3ba --extended-privkey-path exported-key-a
+   head -n 1 ./exported-key-a > mainnet-fnn/nodeA/ckb/key
    chmod 600 mainnet-fnn/nodeA/ckb/key
    # check nodeA key
    ./ckb-cli util key-info --privkey-path mainnet-fnn/nodeA/ckb/key
+   ```
+
+   ```bash
+   # Create a local node directory named nodeB
+   mkdir -p mainnet-fnn/nodeB/ckb
+   ./ckb-cli account new
+   ./ckb-cli account export --lock-arg 0xaa7f14d92341d5570f5680e49ad738e0c990bdba --extended-privkey-path exported-key-b
+   head -n 1 ./exported-key-b > mainnet-fnn/nodeB/ckb/key
+   chmod 600 mainnet-fnn/nodeB/ckb/key
+   # check nodeB key
+   ./ckb-cli util key-info --privkey-path mainnet-fnn/nodeB/ckb/key
    ```
 
 
@@ -50,8 +61,9 @@
 
    ```bash
    cp config/mainnet/config.yml mainnet-fnn/nodeA
+   cp config/mainnet/config.yml mainnet-fnn/nodeB
    ```
-	As the comment says, “[use a trusted CKB RPC node](https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/config/mainnet/config.yml#L55)” should be changed to the RPC endpoint of a CKB node you trust.
+	As the comment says, "[use a trusted CKB RPC node](https://github.com/nervosnetwork/fiber/blob/2ab20ffb50243c25109a62ef2ac18b7e4f1a9e70/config/mainnet/config.yml#L55)" should be changed to the RPC endpoint of a CKB node you trust.
    For convenience, I used [Public JSON RPC nodes](https://github.com/nervosnetwork/ckb/wiki/Public-JSON-RPC-nodes) here.
    
     ``` bash
@@ -60,27 +72,38 @@
    grep rpc_url mainnet-fnn/nodeA/config.yml
     ```
 
+   For nodeB, also modify `rpc_url` and change the listening ports to avoid conflicts with nodeA:
+
+    ```bash
+   sed -i.bak 's|rpc_url:.*|rpc_url: "https://mainnet.ckbapp.dev/"|' mainnet-fnn/nodeB/config.yml
+   sed -i.bak 's|/ip4/0.0.0.0/tcp/8228|/ip4/0.0.0.0/tcp/8238|' mainnet-fnn/nodeB/config.yml
+   sed -i.bak 's|127.0.0.1:8227|127.0.0.1:8237|' mainnet-fnn/nodeB/config.yml
+   # check nodeB config
+   grep -E 'rpc_url|listening' mainnet-fnn/nodeB/config.yml
+    ```
 
 
 
-4. Fund nodeA’s address with USDI via utxoswap
+
+4. Fund nodeA's and nodeB's addresses with USDI via utxoswap
 
    - USDI: https://utxoswap.xyz
 
 
 
-5. Start the node A
+5. Start the nodes
 
    You need to set a `FIBER_SECRET_KEY_PASSWORD` environment variable in the startup command to encrypt your wallet private key file. I used `123` here for demo purposes, but I recommend using a strong password.
    
    ```bash
    FIBER_SECRET_KEY_PASSWORD='123' RUST_LOG=info ./fnn -c mainnet-fnn/nodeA/config.yml -d mainnet-fnn/nodeA > mainnet-fnn/nodeA/a.log 2>&1 &
+   FIBER_SECRET_KEY_PASSWORD='123' RUST_LOG=info ./fnn -c mainnet-fnn/nodeB/config.yml -d mainnet-fnn/nodeB > mainnet-fnn/nodeB/b.log 2>&1 &
    ```
 
 
 
 
-## Establishing a CKB Channel with Public Node 1
+## Establishing a CKB Channel: nodeA ⟺ node1
 
 
 1. Establish a network connection between nodeA and node1
@@ -167,9 +190,102 @@
 
 
 
-4. Call the `new_invoice` API on node2 to generate an invoice
 
-   Set the amount to 0x5f5e100 (100,000,000 shannon), which is equivalent to 1 CKB. The payment_preimage should be a unique 32-byte hexadecimal number.
+## Establishing a CKB Channel: nodeB ⟺ node2
+
+
+1. Establish a network connection between nodeB and node2
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
+       "id": 1,
+       "jsonrpc": "2.0",
+       "method": "connect_peer",
+       "params": [
+           {
+               "address": "/ip4/54.178.252.1/tcp/8228/p2p/QmZ73KHvZ5GFxf6XhHZ3icPeKFo93rk86kZ8qauox3avJP"
+           }
+       ]
+   }'
+   ```
+
+   ```json
+   {"jsonrpc":"2.0","result":null,"id":1}
+   ```
+
+
+
+2. Establish a channel with 499ckb: nodeB (400ckb) ⟺ node2 (151ckb)
+
+   _Node2 has open_channel_auto_accept_min_ckb_funding_amount set at 400ckb, so please input 499ckb or more._
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
+       "id": 2,
+       "jsonrpc": "2.0",
+       "method": "open_channel",
+       "params": [
+           {
+               "peer_id": "QmZ73KHvZ5GFxf6XhHZ3icPeKFo93rk86kZ8qauox3avJP",
+               "funding_amount": "0xb9e459300",
+               "public": true
+           }
+       ]
+   }'
+   ```
+
+   ```json
+   {"jsonrpc":"2.0","id":2,"result":{"temporary_channel_id":"0x9475bdfc2f88d20752139dfc77eef3d2b3197f9c529401b9d322756f936838ee"}}
+   ```
+
+
+
+
+3. Query the channels between nodeB and node2
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
+       "id": 3,
+       "jsonrpc": "2.0",
+       "method": "list_channels",
+       "params": [
+           {
+               "peer_id": "QmZ73KHvZ5GFxf6XhHZ3icPeKFo93rk86kZ8qauox3avJP"
+           }
+       ]
+   }'
+   ```
+
+   Wait until the state_name changes to `CHANNEL_READY`.
+
+   ```json
+   {"jsonrpc":"2.0","id":3,"result":{"channels":[{"channel_id":"0x4b86abb452b35b25aabf0215dc4dbadc998dec8b2dc762f50284c7091d542b1e","is_public":true,"is_acceptor":false,"is_one_way":false,"channel_outpoint":"0xba4d16d112368d757b725d494f60451a6316540a630cd9db2d79b5cd8ebb9e6d00000000","peer_id":"QmZ73KHvZ5GFxf6XhHZ3icPeKFo93rk86kZ8qauox3avJP","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY"},"local_balance":"0x9502f9000","offered_tlc_balance":"0x0","remote_balance":"0x38407b700","received_tlc_balance":"0x0","pending_tlcs":[],"latest_commitment_transaction_hash":"0x552aad4fade10b03182e561aea66a4ab2e86fc9fb261748093bc3d6974938a8c","created_at":"0x19caf2674a0","enabled":true,"tlc_expiry_delta":"0xdbba00","tlc_fee_proportional_millionths":"0x3e8","shutdown_transaction_hash":null,"failure_detail":null}]}}
+   ```
+
+   nodeB: 499 CKB - 99 CKB = 400 CKB (local_balance is 0x9502f9000)
+
+   node2: 250 CKB - 99 CKB = 151 CKB (remote_balance is 0x38407b700)
+
+
+
+## Multi-Hop CKB Payment: nodeA → node1 → node2 → nodeB
+
+Now that both channels are established, we can send a multi-hop payment from nodeA to nodeB through the public nodes. The payment route is:
+
+```
+┌───────┐        ┌───────┐        ┌───────┐        ┌───────┐
+│ nodeA │ ─CKB─▶ │ node1 │ ─CKB─▶ │ node2 │ ─CKB─▶ │ nodeB │
+│:8227  │        │public │        │public │        │:8237  │
+└───────┘        └───────┘        └───────┘        └───────┘
+  sender        relay node 1     relay node 2      receiver
+```
+
+Since node1 and node2's RPC are not publicly accessible, we can only query balance changes on nodeA (port 8227) and nodeB (port 8237). The total fee charged by the intermediate nodes (node1 + node2) can be inferred from the difference.
+
+
+1. Generate an invoice on nodeB
+
+   Set the amount to 0x5f5e100 (100,000,000 shannon), equivalent to 1 CKB. The payment_preimage should be a unique 32-byte hexadecimal number.
 
    ```bash
    # Generate a 32-byte random number and represent it in hexadecimal
@@ -178,74 +294,71 @@
    ```
 
    ```bash
-   0xbc03e507befb33cfd5953a2e7046428e69cb8f0ade65c05d3661128aa4b4fff9
-   ```
-
-   ```bash
-   curl -s --location 'http://18.163.221.211:8227' --header 'Content-Type: application/json' --data '{
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
        "id": 4,
        "jsonrpc": "2.0",
        "method": "new_invoice",
        "params": [
            {
                "amount": "0x5f5e100",
-               "currency": "Fibt",
-               "description": "test invoice generated by node2",
+               "currency": "Fibb",
+               "description": "test invoice generated by nodeB",
                "expiry": "0xe10",
                "final_cltv": "0x28",
-               "payment_preimage": "0xbc03e507befb33cfd5953a2e7046428e69cb8f0ade65c05d3661128aa4b4fff9",
+               "payment_preimage": "'$payment_preimage'",
                "hash_algorithm": "sha256"
            }
        ]
    }'
    ```
 
-   ```json
-   {"jsonrpc":"2.0","result":{"invoice_address":"fibt1000000001peseucdphcxgfw0pnm6vk3uftyc36dakyjchs0p0unk9gaug0h36uhafww9pvy38gcesad084rx48xgx9xts49yp9fn87yfchld3l3qu5n0pfzvvy8c9g7dksrcxyrtk3hymspezmvtx4vg5v6uvt6tyxmq5uhrfejpk0j6wue9ef2pa8mzmrgqaz3wucutujtjcmq2x8f36faxuctg62ny73mhaj7rpwqe0ns0wp5wr4tku7qcl9r4a3swluvd2jqqwmsl7wsz4cwvhhe7p8tr7hz5qkqwr3r38hukckqzjtmntd8zrz0ywux4u8df005hl76thzsp9hz7dyefzk4mqhx4x9el98zjzmhcveqpfeur79","invoice":{"currency":"Fibt","amount":"0x5f5e100","signature":"0e1b101f1e0e100215180e0c1717191e01070b031e1702140016000e0311031107171c1618160002120b1b130b0d070203020f040e1c06151c070d090f0f14171f1e1a0b170210010517021e0d0419090216151b001706150605191f05070212021b17180c190001","data":{"timestamp":"0x1958944fa64","payment_hash":"0xafb604f74c28009732ed4c82983cf1efaddf62ee36442f360fb4a8c79b845432","attrs":[{"Description":"test invoice generated by node2"},{"ExpiryTime":{"secs":3600,"nanos":0}},{"HashAlgorithm":"sha256"},{"PayeePublicKey":"0291a6576bd5a94bd74b27080a48340875338fff9f6d6361fe6b8db8d0d1912fcc"}]}}},"id":4}
-   ```
-
    Record the `invoice_address` from the response.
 
 
 
-5. Before sending the payment from nodeA, first query the local_balance and remote_balance of each channel
+2. Query channel balances before payment
 
    nodeA ⟺ node1
 
-   As shown in Step 3, the response included: `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`
-
-   node1 ⟺ node2
-
    ```bash
-   curl -s --location 'http://18.162.235.225:8227' --header 'Content-Type: application/json' --data '{
+   curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
        "id": 5,
        "jsonrpc": "2.0",
        "method": "list_channels",
        "params": [
            {
-               "peer_id": "QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89"
+               "peer_id": "QmZCfzENZqWrWwifJj9BFDvxQWFyYw5GjdB4vN7Ynd4FxY"
            }
        ]
    }'
    ```
 
-    ```json
-    {"jsonrpc":"2.0","result":{"channels":[{"channel_id":"0x29a2e93e70fcfcd8b64fd74646b3893247f2a73a9dd8706298b5defa17bfee0a","is_public":true,"channel_outpoint":"0xa065311059be4d2194d9d6dbc428fe794ed3c6d91e08fe1d960d1574c19f88d400000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x173c0e06bb","offered_tlc_balance":"0x1f5","remote_balance":"0xc68e145","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x195e1cbd1dd062752e776a44dd9c12f3b83a69dfdd1e22edff19025572bcbd25","created_at":"0x1944491c154","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4cd5bdcac419b203fd5752c4daa00a6f24305123d65f7a7fa6b455df82e97eee","is_public":true,"channel_outpoint":"0xe7d8464be26933021810f31252a98e9b2b1ff00f70173fafb134861ce21bccbb00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x1748630df7","offered_tlc_balance":"0x0","remote_balance":"0x13da09","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6bd9890fd65297359079d87a995d794becc90bafd5eca9676ccbfd96abcb3ffd","created_at":"0x194448fc295","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x9e72e8dbf7409a5aaf456dbe25f61247450f72079249ee508bb23cb14d0408b1","is_public":true,"channel_outpoint":"0x49f5f1cf664d48df66943989ef87d1316f1dffe5aec96db9ee8f1b6879ccac1b00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xa38b9d","offered_tlc_balance":"0x0","remote_balance":"0x1747d35c63","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6ad24a7dda73ed2ff896401ba4487c207362510670295b60288040df4b78884d","created_at":"0x194448ea599","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x632548057f0f13752e6d55ea666a93aaae450f2cf6e31093142c940071648f88","is_public":true,"channel_outpoint":"0xb0fcf51f0587c3c623377d054874dbb6ff1e8a26950834ace30dc88003af05f900000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":{"code_hash":"0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a","hash_type":"type","args":"0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b"},"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0xc505f","offered_tlc_balance":"0x0","remote_balance":"0x17486a97a1","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x62892d0751149af74d6baa7d7e09215427858d8dd047ae62b9179c8779d236e5","created_at":"0x194448dbf4b","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x0d54942293e7bb2704749e85741fd65e9a3d2f4eb380eb33b0aa0d38f891638f","is_public":true,"channel_outpoint":"0xf846f128450f3319352e8b48a38060feaed09d834f8d1c4d98477069f64ef78100000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x45a9b5cf3","offered_tlc_balance":"0x0","remote_balance":"0x916e2dc010d","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x68002aad33179b3d7bd21234ecf7a296f71833ecd4a69632e294c583e73181ff","created_at":"0x1944489267e","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x4c84c39f5166eb15631fca02dbc1910fa0139ad0ec6732ab2cc51c275d8fc11b","is_public":true,"channel_outpoint":"0x5c871464dc91eaf6fb262157329dc90d00b96cafaf272bd322184cab5d2601fa00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x504f21d045c","offered_tlc_balance":"0x0","remote_balance":"0x4164b5a59a4","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x117b18ac0789b44e3a08504d503a9cbf29acd2a4050069a640f67d7ec8209a00","created_at":"0x1944487f433","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x728fce53aaedf010b8f7c09497f3ab8527382ada0b6691cc61c04badf4837296","is_public":true,"channel_outpoint":"0x713364717227e24ebcf1b1ddd469f3f278e8b4069ebd23631d2aca12fffa2e1c00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x916d6f044e9","offered_tlc_balance":"0x0","remote_balance":"0x466871917","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x83a0d88fd312bb14f3cf953888257581d859230d1230b21b487a5cda48be7c8d","created_at":"0x1944485b77f","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0xfb27dc9ebc391440afe5e25cd4dc25e302b6fbb089397eda07decdb04db14b9e","is_public":true,"channel_outpoint":"0x56b3edb1dd683f9149286069881395bb878c69fbff638b7dc6d1bca1c83acd6400000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5ace976","offered_tlc_balance":"0x0","remote_balance":"0x49087ca748a","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0xe6a25f3420db9f0a436df0214fa5622a39a8975549f861f941d33cf8fba19e2e","created_at":"0x1944483b877","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"},{"channel_id":"0x92b04366f93500efef5f28ba79704fa3a0e3771148899aa8836f0e5d2fbc38d5","is_public":true,"channel_outpoint":"0x61368447e60f0aa15ef61e13539d19d2f32fbacb20728db4248d8c82fa56079a00000000","peer_id":"QmbKyzq9qUmymW2Gi8Zq7kKVpPiNA1XUJ6uMvsUC4F3p89","funding_udt_type_script":null,"state":{"state_name":"CHANNEL_READY","state_flags":[]},"local_balance":"0x48ab5acd200","offered_tlc_balance":"0x0","remote_balance":"0x49087ca8c00","received_tlc_balance":"0x0","latest_commitment_transaction_hash":"0x6048cd50eb71aa8fabda1a5d567ceb5fb84181efbb36d839245e253e382bbfaf","created_at":"0x194447dd85a","enabled":true,"tlc_expiry_delta":"0x5265c00","tlc_fee_proportional_millionths":"0x3e8"}]},"id":5}
-    ```
-   Find all entries in the response where `funding_udt_type_script` is null.
-   ```json
-   {"local_balance":"0x45a9b5cf3","remote_balance":"0x916e2dc010d"}
-   {"local_balance":"0x504f21d045c","remote_balance":"0x4164b5a59a4"}
-   {"local_balance":"0x916d6f044e9","remote_balance":"0x466871917"}
-   {"local_balance":"0x48ab5ace976","remote_balance":"0x49087ca748a"}
-   {"local_balance":"0x48ab5acd200","remote_balance":"0x49087ca8c00"}
+   nodeB ⟺ node2
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
+       "id": 5,
+       "jsonrpc": "2.0",
+       "method": "list_channels",
+       "params": [
+           {
+               "peer_id": "QmZ73KHvZ5GFxf6XhHZ3icPeKFo93rk86kZ8qauox3avJP"
+           }
+       ]
+   }'
    ```
 
+   As shown in the channel establishment sections, the initial balances are:
+
+   nodeA ⟺ node1: `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`
+
+   nodeB ⟺ node2: `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`
 
 
-6. Send a send_payment request from nodeA to pay node2
 
-   Pass in the previously recorded invoice_address to the `send_payment` request
+3. Send payment from nodeA to nodeB
+
+   Pass in the previously recorded `invoice_address` to the `send_payment` request on nodeA.
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
@@ -254,35 +367,29 @@
        "method": "send_payment",
        "params": [
            {
-               "invoice": "fibt1000000001peseucdphcxgfw0pnm6vk3uftyc36dakyjchs0p0unk9gaug0h36uhafww9pvy38gcesad084rx48xgx9xts49yp9fn87yfchld3l3qu5n0pfzvvy8c9g7dksrcxyrtk3hymspezmvtx4vg5v6uvt6tyxmq5uhrfejpk0j6wue9ef2pa8mzmrgqaz3wucutujtjcmq2x8f36faxuctg62ny73mhaj7rpwqe0ns0wp5wr4tku7qcl9r4a3swluvd2jqqwmsl7wsz4cwvhhe7p8tr7hz5qkqwr3r38hukckqzjtmntd8zrz0ywux4u8df005hl76thzsp9hz7dyefzk4mqhx4x9el98zjzmhcveqpfeur79"
+               "invoice": "<invoice_address from step 1>"
            }
        ]
    }'
    ```
 
-   ```json
-   {"jsonrpc":"2.0","result":{"payment_hash":"0xafb604f74c28009732ed4c82983cf1efaddf62ee36442f360fb4a8c79b845432","status":"Created","created_at":"0x1958957cc7d","last_updated_at":"0x1958957cc7d","failed_error":null,"fee":"0x186a0"},"id":6}
-   ```
+
+
+4. Repeat Steps 1 and 3 two more times
+
+   Perform two additional `new_invoice` (on nodeB) and `send_payment` (on nodeA) requests, keeping the amount set to 0x5f5e100.
 
 
 
-7. Repeat Steps 4 and 6 two more times
-
-   Perform two additional `new_invoice` and `send_payment` requests, keeping the amount set to 0x5f5e100.
-
-
-
-8. Query the local_balance and remote_balance of each channel again
+5. Query channel balances after payments
 
    nodeA ⟺ node1
 
-   Balances changed from`{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}`to`{"local_balance":"0x94a3d8260","remote_balance":"0x389f9baa0"}`.
+   Balances changed from `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}` to `{"local_balance":"0x93e44c414","remote_balance":"0x395f282ec"}`
 
-   node1 ⟺ node2
+   nodeB ⟺ node2
 
-   Balances changed from `{"local_balance":"0x48ab5acd200","remote_balance":"0x49087ca8c00"}`to`{"local_balance":"0x48aa3cb2f00","remote_balance":"0x49099ac2f00"}`.
-
-   All other entries remain unchanged.
+   Balances changed from `{"local_balance":"0x9502f9000","remote_balance":"0x38407b700"}` to `{"local_balance":"0x962113300","remote_balance":"0x372261400"}`
 
 
 
@@ -290,31 +397,31 @@
 
    - Before payments
 
-     nodeA (40,000,000,000) ⟺ node1 (15,100,000,000)
+     nodeA (40000000000) ⟺ node1 (15100000000)
 
-     node1 (4,993,800,000,000) ⟺ node2 (5,018,800,000,000)
+     nodeB (40000000000) ⟺ node2 (15100000000)
 
    - After payments
 
-     nodeA (39,699,700,000) ⟺ node1 (15,400,300,000)
+     nodeA (39699399700) ⟺ node1 (15400600300)
 
-     node1 (4,993,500,000,000) ⟺ node2 (5,019,100,000,000)
+     nodeB (40300000000) ⟺ node2 (14800000000)
 
    Funds changes:
 
-   ​	nodeA: 39,699,700,000 - 40,000,000,000 = -300,300,000
+   ​	nodeA: 39699399700 - 40000000000 = -300600300
 
-   ​	node1: 4,993,500,000,000 + 15,400,300,000 - 4,993,800,000,000 - 15,100,000,000 = 300,000
+   ​	nodeB: 40300000000 - 40000000000 = +300000000
 
-   ​	node2: 5,019,100,000,000 - 5,018,800,000,000 = 300,000,000
+   ​	Total intermediate fees (node1 + node2): 300600300 - 300000000 = 600300
 
-   **Conclusion: Three CKB payments of 100,000,000 shannon each from nodeA → node1 → node2 were successfully completed. The intermediate node (node1) earned a total fee of 300,000 shannon.**
+   **Conclusion: Three CKB payments of 100,000,000 shannon (1 CKB) each from nodeA → node1 → node2 → nodeB were successfully completed. nodeA paid a total of 300,600,300 shannon, nodeB received 300,000,000 shannon, and the two intermediate relay nodes (node1 + node2) earned a combined fee of 600,300 shannon.**
 
 
 
-9. Close the channel between nodeA and node1
+6. Close the channels
 
-   Pass in the channel_id and the receiving address as parameters.
+   Close nodeA's channel with node1:
 
    ```bash
    curl -s --location 'http://127.0.0.1:8227' --header 'Content-Type: application/json' --data '{
@@ -323,11 +430,11 @@
        "method": "shutdown_channel",
        "params": [
            {
-               "channel_id": "0x26ce85d57fb4a1a826cbf4862358862317a83b775090625550d8be12c6ce9569",
+               "channel_id": "0xa1cda836a83c0eabf287b150a69c6dfad4be9646c7be5d813e2b10f823363971",
                "close_script": {
                    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
                    "hash_type": "type",
-                   "args": "0xcc015401df73a3287d8b2b19f0cc23572ac8b14d"
+                   "args": "0xd4cf2823703d170f923549d8efeb34260fc0f3ba"
                },
                "fee_rate": "0x3FC"
            }
@@ -335,13 +442,30 @@
    }'
    ```
 
-   ```json
-   {"jsonrpc":"2.0","result":null,"id":9}
+   Close nodeB's channel with node2:
+
+   ```bash
+   curl -s --location 'http://127.0.0.1:8237' --header 'Content-Type: application/json' --data '{
+       "id": 9,
+       "jsonrpc": "2.0",
+       "method": "shutdown_channel",
+       "params": [
+           {
+               "channel_id": "0x4b86abb452b35b25aabf0215dc4dbadc998dec8b2dc762f50284c7091d542b1e",
+               "close_script": {
+                   "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                   "hash_type": "type",
+                   "args": "0xaa7f14d92341d5570f5680e49ad738e0c990bdba"
+               },
+               "fee_rate": "0x3FC"
+           }
+       ]
+   }'
    ```
 
-   You can see on the CKB explorer that nodeA’s address received a new transaction of +496.99699462 CKB.
-   This indicates that multiple off-chain CKB transfers through Fiber nodes are eventually settled on-chain upon channel closure via the shutdown_channel request.
-
+   After channel closure, the on-chain settlement will reflect the final balances. You can verify on the CKB explorer that:
+   - nodeA's address received CKB reflecting its remaining channel balance
+   - nodeB's address received CKB reflecting its accumulated payments
 
 
 ## Establishing a UDT Channel with Public Node 1
