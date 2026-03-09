@@ -1,17 +1,15 @@
-use crate::ckb::config::{
-    UdtArgInfo as ConfigUdtArgInfo, UdtCellDep as ConfigUdtCellDep,
-    UdtCfgInfos as ConfigUdtCfgInfos, UdtDep as ConfigUdtDep, UdtScript as ConfigUdtScript,
-};
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{ChannelUpdateInfo, NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
-use crate::fiber::serde_utils::EntityHex;
-use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::{Cursor, Hash256, Pubkey};
 use ckb_jsonrpc_types::{DepType, JsonBytes, OutPoint as OutPointWrapper, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
+use fiber_types::{
+    Cursor, EntityHex, Hash256, Pubkey, U128Hex, U64Hex, UdtArgInfo as ConfigUdtArgInfo,
+    UdtCellDep as ConfigUdtCellDep, UdtCfgInfos as ConfigUdtCfgInfos, UdtDep as ConfigUdtDep,
+    UdtScript as ConfigUdtScript,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::{types::error::INVALID_PARAMS_CODE, types::ErrorObjectOwned};
@@ -146,7 +144,7 @@ pub struct NodeInfo {
     /// The node features supported by the node.
     pub features: Vec<String>,
     /// The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
-    pub node_id: Pubkey,
+    pub pubkey: Pubkey,
     #[serde_as(as = "U64Hex")]
     /// The latest timestamp set by the owner for the node announcement.
     /// When a Node is online this timestamp will be updated to the latest value.
@@ -166,7 +164,7 @@ impl From<super::super::fiber::graph::NodeInfo> for NodeInfo {
             node_name: value.node_name.to_string(),
             version: value.version,
             addresses: value.addresses,
-            node_id: value.node_id,
+            pubkey: value.node_id,
             timestamp: value.timestamp,
             features: value.features.enabled_features_names(),
             chain_hash: get_chain_hash(),

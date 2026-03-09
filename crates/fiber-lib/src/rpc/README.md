@@ -47,6 +47,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_payment`](#payment-get_payment)
         * [Method `build_router`](#payment-build_router)
         * [Method `send_payment_with_router`](#payment-send_payment_with_router)
+        * [Method `list_payments`](#payment-list_payments)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -73,6 +74,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
     * [Type `Currency`](#type-currency)
+    * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
     * [Type `HashAlgorithm`](#type-hashalgorithm)
     * [Type `HopHint`](#type-hophint)
@@ -202,9 +204,8 @@ Attempts to open a channel with a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID to open a channel with (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to open a channel with.
  The peer must be connected through the [connect_peer](#peer-connect_peer) rpc first.
- You can obtain a peer's `peer_id` from the `list_peers` RPC.
 * `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
 * `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `one_way` - <em>`Option<bool>`</em>, Whether this is a one-way channel (will not be broadcasted to network, and can only be used to send payment one way), an optional parameter, default value is false.
@@ -298,7 +299,7 @@ Lists all channels.
 
 ##### Params
 
-* `peer_id` - <em>`Option<PeerId>`</em>, The peer ID to list channels for (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key to list channels for.
  An optional parameter, if not provided, all channels will be listed.
 * `include_closed` - <em>`Option<bool>`</em>, Whether to include closed channels in the list, an optional parameter, default value is false
 * `only_pending` - <em>`Option<bool>`</em>, When set to true, only return channels that are still being opened (non-final states:
@@ -516,9 +517,7 @@ Get the node information.
 
 * `version` - <em>`String`</em>, The version of the node software.
 * `commit_hash` - <em>`String`</em>, The commit hash of the node software.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
- This is the same value referred to as `pubkey` in `list_peers` responses.
- Note: this is different from `peer_id`, which is a base58 hash derived from this key.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of this node (secp256k1 compressed, hex string).
 * `features` - <em>`Vec<String>`</em>, The features supported by the node.
 * `node_name` - <em>`Option<String>`</em>, The optional name of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, A list of multi-addresses associated with the node.
@@ -660,7 +659,6 @@ Sends a payment to a peer.
 
 * `target_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key (`Pubkey`) of the payment target node, serialized as a hex string.
  You can obtain a node's pubkey via the `node_info` or `graph_nodes` RPC.
- Note: this is the `Pubkey` (secp256k1 public key), not the `PeerId`.
 * `amount` - <em>`Option<u128>`</em>, the amount of the payment, the unit is Shannons for non UDT payment
  If not set and there is a invoice, the amount will be set to the invoice amount
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, the hash to use within the payment's HTLC.
@@ -857,6 +855,26 @@ Sends a payment to a peer with specified router.
 
 
 
+<a id="payment-list_payments"></a>
+#### Method `list_payments`
+
+Lists all payments, optionally filtered by status.
+
+##### Params
+
+* `status` - <em>Option<[PaymentStatus](#type-paymentstatus)></em>, Filter payments by status. If not set, all payments are returned.
+* `limit` - <em>`Option<u64>`</em>, The maximum number of payments to return. Default is 15.
+* `after` - <em>Option<[Hash256](#type-hash256)></em>, The payment hash to start returning payments after (exclusive cursor for pagination).
+
+##### Returns
+
+* `payments` - <em>Vec<[GetPaymentCommandResult](#type-getpaymentcommandresult)></em>, The list of payments.
+* `last_cursor` - <em>Option<[Hash256](#type-hash256)></em>, The last cursor for pagination. Use this as `after` in the next request to get more results.
+
+---
+
+
+
 <a id="peer"></a>
 ### Module `Peer`
 RPC module for peer management.
@@ -869,7 +887,10 @@ Connect to a peer.
 
 ##### Params
 
-* `address` - <em>`MultiAddr`</em>, The address of the peer to connect to.
+* `address` - <em>`Option<MultiAddr>`</em>, The address of the peer to connect to.
+ Either `address` or `pubkey` must be provided.
+* `pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The public key of the peer to connect to.
+ The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 
 ##### Returns
@@ -887,7 +908,7 @@ Disconnect from a peer.
 
 ##### Params
 
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer to disconnect (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the peer to disconnect.
 
 ##### Returns
 
@@ -1144,7 +1165,7 @@ The channel data structure
 * `is_one_way` - <em>`bool`</em>, Is this channel one-way?
  Combines with is_acceptor to determine if the channel able to send payment to the counterparty or not.
 * `channel_outpoint` - <em>`Option<OutPoint>`</em>, The outpoint of the channel
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the channel counterparty (base58 string, derived from the peer's `Pubkey`).
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key of the channel counterparty.
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel
 * `state` - <em>[ChannelState](#type-channelstate)</em>, The state of the channel
 * `local_balance` - <em>`u128`</em>, The local balance of the channel
@@ -1271,6 +1292,31 @@ The currency of the invoice, can also used to represent the CKB network chain.
 * `Fibd` - The devnet currency of the CKB network.
 ---
 
+<a id="#type-getpaymentcommandresult"></a>
+### Type `GetPaymentCommandResult`
+
+The result of a get_payment command, which includes the payment hash, status, timestamps,
+ error message if failed, fee paid, and custom records.
+
+
+#### Fields
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ The router is a list of nodes that the payment will go through.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+---
+
 <a id="#type-hash256"></a>
 ### Type `Hash256`
 
@@ -1371,7 +1417,7 @@ The Node information.
 * `version` - <em>`String`</em>, The version of the node.
 * `addresses` - <em>`Vec<MultiAddr>`</em>, The addresses of the node.
 * `features` - <em>`Vec<String>`</em>, The node features supported by the node.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the node (secp256k1 compressed, hex string), same as `pubkey` in `list_peers`.
 * `timestamp` - <em>`u64`</em>, The latest timestamp set by the owner for the node announcement.
  When a Node is online this timestamp will be updated to the latest value.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the node.
@@ -1429,9 +1475,7 @@ The information about a peer connected to the node.
 
 #### Fields
 
-* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer (also known as `node_id`).
-* `peer_id` - <em>`PeerId`</em>, The peer ID of the peer (base58 string, derived by hashing the `pubkey` above).
- This is used for P2P transport connections, e.g. when calling `open_channel` or `disconnect_peer`.
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer.
 * `address` - <em>`MultiAddr`</em>, The multi-address associated with the connecting peer.
  Note: this is only the address which used for connecting to the peer, not all addresses of the peer.
  The `graph_nodes` in Graph rpc module will return all addresses of the peer.
@@ -1450,12 +1494,8 @@ A wrapper for secp256k1 secret key
 ### Type `Pubkey`
 
 A compressed secp256k1 public key (33 bytes), used as the primary identity of a node.
- In the RPC interface this value is also referred to as `node_id`.
+ In the RPC interface this value is exposed as fields such as `pubkey`.
  It is serialized as a 66-character hex string (e.g. `"02aaaa..."`) in JSON.
-
- Note: `Pubkey` is different from `PeerId`. A `PeerId` is derived by hashing the
- public key and is used only for P2P transport connections. You can obtain both
- values from the `list_peers` or `node_info` RPC.
 
 
 
