@@ -1,14 +1,15 @@
 //! Invoice types for the Fiber Network JSON-RPC API.
 
+#[cfg(feature = "schema")]
 use crate::schema_helpers::*;
 use crate::serde_utils::{duration_hex, Hash256, Pubkey, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Currency {
     /// The mainnet currency of CKB.
     Fibb,
@@ -20,7 +21,8 @@ pub enum Currency {
 }
 
 /// HashAlgorithm is the hash algorithm used in the hash lock.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash, JsonSchema)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
     /// The default hash algorithm, CkbHash
@@ -31,7 +33,8 @@ pub enum HashAlgorithm {
 }
 
 /// The status of an invoice.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum CkbInvoiceStatus {
     /// The invoice is open and can be paid.
     Open,
@@ -47,19 +50,20 @@ pub enum CkbInvoiceStatus {
 
 /// The attributes of the invoice.
 #[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Attribute {
     #[serde(with = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     /// This attribute is deprecated since v0.6.0, The final tlc time out, in milliseconds
     FinalHtlcTimeout(u64),
     #[serde(with = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     /// The final tlc minimum expiry delta, in milliseconds, default is 1 day
     FinalHtlcMinimumExpiryDelta(u64),
     #[serde(with = "duration_hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     /// The expiry time of the invoice, in seconds
     ExpiryTime(std::time::Duration),
     /// The description of the invoice
@@ -80,11 +84,12 @@ pub enum Attribute {
 
 /// The metadata of the invoice.
 #[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InvoiceData {
     /// The timestamp of the invoice
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub timestamp: u128,
     /// The payment hash of the invoice
     pub payment_hash: Hash256,
@@ -99,12 +104,16 @@ pub struct InvoiceData {
 ///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
 ///
 #[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CkbInvoice {
     /// The currency of the invoice
     pub currency: Currency,
     #[serde_as(as = "Option<U128Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "schema_as_uint_hex_optional")
+    )]
     /// The amount of the invoice
     pub amount: Option<u128>,
     /// The signature of the invoice (hex encoded)
@@ -115,11 +124,12 @@ pub struct CkbInvoice {
 
 /// The parameter struct for generating a new invoice.
 #[serde_as]
-#[derive(Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NewInvoiceParams {
     /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub amount: u128,
     /// The description of the invoice.
     pub description: Option<String>,
@@ -133,14 +143,20 @@ pub struct NewInvoiceParams {
     pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "schema_as_uint_hex_optional")
+    )]
     pub expiry: Option<u64>,
     /// The fallback address of the invoice.
     pub fallback_address: Option<String>,
     /// The final HTLC timeout of the invoice, in milliseconds.
     /// Minimal value is 16 hours, and maximal value is 14 days.
     #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "schema_as_uint_hex_optional")
+    )]
     pub final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
     pub udt_type_script: Option<Script>,
@@ -153,7 +169,8 @@ pub struct NewInvoiceParams {
 }
 
 /// Result of creating a new invoice.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InvoiceResult {
     /// The encoded invoice address.
     pub invoice_address: String,
@@ -162,28 +179,32 @@ pub struct InvoiceResult {
 }
 
 /// Parameters for parsing an invoice.
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ParseInvoiceParams {
     /// The encoded invoice address.
     pub invoice: String,
 }
 
 /// Result of parsing an invoice.
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ParseInvoiceResult {
     /// The invoice.
     pub invoice: CkbInvoice,
 }
 
 /// Parameters for getting an invoice by payment hash.
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InvoiceParams {
     /// The payment hash of the invoice.
     pub payment_hash: Hash256,
 }
 
 /// Parameters for settling an invoice.
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SettleInvoiceParams {
     /// The payment hash of the invoice.
     pub payment_hash: Hash256,
@@ -192,11 +213,13 @@ pub struct SettleInvoiceParams {
 }
 
 /// Result of settling an invoice.
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SettleInvoiceResult {}
 
 /// The status of the invoice.
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GetInvoiceResult {
     /// The encoded invoice address.
     pub invoice_address: String,

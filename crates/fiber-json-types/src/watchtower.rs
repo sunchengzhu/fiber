@@ -1,35 +1,37 @@
 //! Watchtower types for the Fiber Network JSON-RPC API.
 
 use crate::invoice::HashAlgorithm;
+#[cfg(feature = "schema")]
 use crate::schema_helpers::*;
 use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::{Bytes, CellOutput};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 /// The id of a TLC, it can be either offered or received.
 #[serde_as]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TLCId {
     /// Offered TLC id
     Offered(
         #[serde_as(as = "U64Hex")]
-        #[schemars(schema_with = "schema_as_uint_hex")]
+        #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
         u64,
     ),
     /// Received TLC id
     Received(
         #[serde_as(as = "U64Hex")]
-        #[schemars(schema_with = "schema_as_uint_hex")]
+        #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
         u64,
     ),
 }
 
 /// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SettlementTlc {
     /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,
@@ -37,13 +39,13 @@ pub struct SettlementTlc {
     pub hash_algorithm: HashAlgorithm,
     /// The amount of CKB/UDT involved in the TLC
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub payment_amount: u128,
     /// The hash of the payment preimage
     pub payment_hash: Hash256,
     /// The expiry time for the TLC in milliseconds
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub expiry: u64,
     /// The local party's private key used to sign the TLC (hex without 0x prefix)
     pub local_key: Privkey,
@@ -53,15 +55,16 @@ pub struct SettlementTlc {
 
 /// Data needed to authorize and execute a settlement transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SettlementData {
     /// The total amount of CKB/UDT being settled for the local party
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub local_amount: u128,
     /// The total amount of CKB/UDT being settled for the remote party
     #[serde_as(as = "U128Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub remote_amount: u128,
     /// The list of pending Time-Locked Contracts (TLCs) included in this settlement
     pub tlcs: Vec<SettlementTlc>,
@@ -69,29 +72,31 @@ pub struct SettlementData {
 
 /// Data needed to revoke an outdated commitment transaction.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RevocationData {
     /// The commitment transaction version number that was revoked
     #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_uint_hex"))]
     pub commitment_number: u64,
     /// The aggregated signature from both parties that authorizes the revocation (hex string, 64 bytes)
     #[serde_as(as = "SliceHex")]
-    #[schemars(schema_with = "schema_as_hex_bytes")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_hex_bytes"))]
     pub aggregated_signature: Vec<u8>,
     /// The output cell from the revoked commitment transaction (hex-encoded molecule bytes)
     #[serde_as(as = "EntityHex")]
-    #[schemars(schema_with = "schema_as_hex_bytes")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_hex_bytes"))]
     pub output: CellOutput,
     /// The associated data for the output cell (e.g., UDT amount for token transfers, hex-encoded molecule bytes)
     #[serde_as(as = "EntityHex")]
-    #[schemars(schema_with = "schema_as_hex_bytes")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema_as_hex_bytes"))]
     pub output_data: Bytes,
 }
 
 /// Parameters for creating a watch channel.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreateWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -111,7 +116,8 @@ pub struct CreateWatchChannelParams {
 
 /// Parameters for removing a watch channel.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RemoveWatchChannelParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -119,7 +125,8 @@ pub struct RemoveWatchChannelParams {
 
 /// Parameters for updating revocation.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdateRevocationParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -131,7 +138,8 @@ pub struct UpdateRevocationParams {
 
 /// Parameters for updating pending remote settlement.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdatePendingRemoteSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -141,7 +149,8 @@ pub struct UpdatePendingRemoteSettlementParams {
 
 /// Parameters for updating local settlement.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdateLocalSettlementParams {
     /// Channel ID
     pub channel_id: Hash256,
@@ -151,7 +160,8 @@ pub struct UpdateLocalSettlementParams {
 
 /// Parameters for creating a preimage.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreatePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,
@@ -161,7 +171,8 @@ pub struct CreatePreimageParams {
 
 /// Parameters for removing a preimage.
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RemovePreimageParams {
     /// Payment hash
     pub payment_hash: Hash256,

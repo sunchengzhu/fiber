@@ -7,7 +7,7 @@ description = "RPC JSON request/response types for the Fiber Network"
 [dependencies]
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_with = { version = "3.7", features = ["macros", "schemars_1"] }
+serde_with = { version = "3.7", features = ["macros"] }
 serde_json = "1.0"
 hex = "0.4"
 
@@ -18,8 +18,8 @@ ckb-types = "1"
 # Molecule (for EntityHex serialization of OutPoint)
 molecule = "0.9.2"
 
-# For JsonSchema
-schemars = "1"
+# For JsonSchema (optional, used by openrpc-json-generator)
+schemars = { version = "1", optional = true }
 
 # Optional: conversion feature deps
 fiber-types = { path = "../fiber-types", optional = true }
@@ -31,6 +31,7 @@ cch = []
 conversion = ["fiber-types"]
 watchtower = ["fiber-types/watchtower", "musig2"]
 all = ["conversion", "cch", "watchtower", "fiber-types/cch"]
+schema = ["dep:schemars", "serde_with/schemars_1"]
 
 [lints.clippy]
 expect-fun-call = "allow"
