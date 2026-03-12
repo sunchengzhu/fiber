@@ -4,6 +4,7 @@
 //! fiber-json-types can be compiled without depending on fiber-types.
 
 use molecule::prelude::Entity;
+#[cfg(feature = "schema")]
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{serde_as, serde_conv, DeserializeAs, SerializeAs};
@@ -173,6 +174,7 @@ impl From<HexU32> for u32 {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for HexU32 {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "HexU32".into()
@@ -267,6 +269,7 @@ impl core::str::FromStr for Pubkey {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for Pubkey {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Pubkey".into()
@@ -346,6 +349,7 @@ impl core::str::FromStr for Privkey {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for Privkey {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Privkey".into()
@@ -412,6 +416,7 @@ impl core::str::FromStr for Hash256 {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for Hash256 {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Hash256".into()
@@ -559,6 +564,7 @@ macro_rules! define_rpc_flags {
             }
         }
 
+        #[cfg(feature = "schema")]
         impl schemars::JsonSchema for $name {
             fn schema_name() -> std::borrow::Cow<'static, str> {
                 stringify!($name).into()

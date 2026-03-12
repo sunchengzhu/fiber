@@ -23,6 +23,7 @@
 //! - `prof`: Profiling types
 //! - `context`: RPC context types
 
+#[cfg(feature = "schema")]
 pub mod schema_helpers;
 pub mod serde_utils;
 

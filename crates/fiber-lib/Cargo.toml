@@ -116,6 +116,7 @@ sample = ["fiber-types/sample"]
 watchtower = []
 metrics = ["dep:metrics", "ractor/metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter-prometheus"]
 pprof = ["dep:pprof"]
+schema = ["fiber-json-types/schema"]
 
 [dev-dependencies]
 ciborium = "0.2.2"
