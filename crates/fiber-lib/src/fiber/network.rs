@@ -5390,3 +5390,26 @@ impl ToBeAcceptedChannels {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn funding_retry_delay_exponential_backoff() {
+        assert_eq!(funding_retry_delay(0), Duration::from_millis(2000));
+        assert_eq!(funding_retry_delay(1), Duration::from_millis(4000));
+        assert_eq!(funding_retry_delay(2), Duration::from_millis(8000));
+        assert_eq!(funding_retry_delay(3), Duration::from_millis(16000));
+        assert_eq!(funding_retry_delay(4), Duration::from_millis(32000));
+    }
+
+    #[test]
+    fn funding_retry_delay_caps_at_max() {
+        // max_shift = (60000 / 2000).ilog2() = 4, so the highest shift is 4
+        // producing 2000 * 16 = 32000 ms. Values above that stay at 32s.
+        assert_eq!(funding_retry_delay(5), Duration::from_millis(32000));
+        assert_eq!(funding_retry_delay(10), Duration::from_millis(32000));
+        assert_eq!(funding_retry_delay(u32::MAX), Duration::from_millis(32000));
+    }
+}

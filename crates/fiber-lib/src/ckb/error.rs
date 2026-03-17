@@ -160,4 +160,30 @@ mod tests {
         assert!(!FundingError::OverflowError.is_temporary());
         assert!(!FundingError::InvalidPeerFundingTx.is_temporary());
     }
+
+    #[test]
+    fn tx_builder_error_with_http_message_is_temporary() {
+        // Errors whose Display output contains transient HTTP patterns should be
+        // classified as temporary even when the source chain is opaque.
+        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
+            anyhow::anyhow!("cell collector error: `http error: `error sending request``"),
+        ));
+        assert!(err.is_temporary());
+    }
+
+    #[test]
+    fn tx_builder_error_with_timeout_message_is_temporary() {
+        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
+            anyhow::anyhow!("operation timed out"),
+        ));
+        assert!(err.is_temporary());
+    }
+
+    #[test]
+    fn error_chain_non_transient_message_is_not_temporary() {
+        let err = FundingError::CkbTxBuilderError(TxBuilderError::InvalidParameter(
+            anyhow::anyhow!("not enough capacity"),
+        ));
+        assert!(!err.is_temporary());
+    }
 }
