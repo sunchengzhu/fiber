@@ -476,3 +476,40 @@
 | T-19 | 功能覆盖 | 使用自定义 cell deps | P2 |
 | T-20 | 功能覆盖 | 与已有 open_channel 流程的兼容性 | P1 |
 | T-21 | 状态观察 | 提交签名前查看通道状态 | P2 |
+
+---
+
+## 附录：PR 单元测试与集成测试覆盖对照
+
+PR #1120 在 `crates/fiber-lib/src/fiber/tests/channel.rs` 中新增了 13 个单元测试。以下分析每个单元测试是否已被上述集成测试用例覆盖，以及是否需要补充新的集成测试。
+
+| 单元测试 | 测试内容 | 对应集成测试 | 是否需要补充 |
+|----------|----------|-------------|-------------|
+| `test_channel_state_bincode_compatibility` | 验证 ChannelState 枚举的 bincode 序列化兼容性 | 无 | **否** — 内部序列化细节，无 RPC 接口可测 |
+| `test_open_channel_with_external_funding` | 开通外部资金通道，验证返回值 | **T-01** | 否 |
+| `test_submit_signed_funding_tx` | 提交签名交易，验证状态推进 | **T-02** | 否 |
+| `test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake` | 双方完成 commitment 握手 | **T-04** | 否 |
+| `test_submit_signed_funding_tx_wrong_state` | 对普通通道提交签名交易被拒 | **T-09** | 否 |
+| `test_submit_signed_funding_tx_duplicate` | 重复提交被拒 | **T-10** | 否 |
+| `test_submit_signed_funding_tx_output_mismatch` | output 篡改被拒 | **T-05** | 否 |
+| `test_submit_signed_funding_tx_input_count_mismatch` | input 数量不一致被拒 | **T-06** | 否 |
+| `test_external_funding_invalid_tlc_expiry_delta` | 非法 tlc_expiry_delta 被拒 | **T-12** | 否 |
+| `test_external_funding_invalid_commitment_delay` | 非法 commitment_delay 被拒 | **T-13** | 否 |
+| `test_external_funding_timeout_abort` | 超时自动中止 | **T-14** | 否 |
+| `test_external_funding_signed_submission_not_aborted_by_stale_timeout` | 已提交后超时不中止 | **T-15** | 否 |
+| `test_external_funding_pending_reply_returns_error_when_channel_stops` | 通道被中止时 pending 的 RPC 调用返回错误 | 无 | **否** — 见下方说明 |
+
+### 不需要补充的单元测试说明
+
+**`test_channel_state_bincode_compatibility`**：验证 `ChannelState` 枚举（含新增的 `AwaitingExternalFunding`）的 bincode 序列化字节与预期一致。这是纯粹的内部数据序列化测试，没有对应的 RPC 接口可以通过集成测试验证，也不影响外部可观测行为。
+
+**`test_external_funding_pending_reply_returns_error_when_channel_stops`**：验证当 Node B 未启用 auto_accept 时，`open_channel_with_external_funding` 的 RPC 调用会阻塞等待对方接受；此时若通过 `abandon_channel` 中止通道，阻塞中的 RPC 调用应返回错误。在集成测试中难以复现此场景，原因是：
+1. `open_channel_with_external_funding` RPC 调用是阻塞的（不返回直到对方接受或出错）
+2. 需要在 RPC 阻塞期间获取临时 channel_id，但该 ID 只通过内部事件暴露，无法通过 RPC 获取
+3. 需要同时发起另一个 RPC 调用（`abandon_channel`），但第一个调用尚未返回 channel_id
+
+这是一个内部 actor 消息传递的边界条件测试，通过单元测试覆盖更为合适。
+
+### 结论
+
+**无需补充新的集成测试用例。** 现有 21 个集成测试用例（T-01 至 T-21）已覆盖了 PR 中所有可通过 RPC 接口验证的场景。剩余 2 个未覆盖的单元测试（bincode 兼容性、pending reply 错误处理）属于内部实现细节，不适合也不需要通过集成测试验证。
