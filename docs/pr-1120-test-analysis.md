@@ -1,275 +1,478 @@
-# PR #1120 测试分析：支持外部钱包签名的通道资金注入
+# PR #1120 集成测试用例：支持外部钱包签名的通道资金注入
 
 > PR: https://github.com/nervosnetwork/fiber/pull/1120
-> 状态：Open（截至 2026-03-18）
-> 目标分支：`develop`，里程碑：v0.8
-> 功能概述：Fiber 当前依赖 CKB 私钥来初始化和签名交易，但大多数 Web 钱包不支持导出私钥。此 PR 增加了通过外部签名的 funding 交易来开通通道的支持，新增两个 RPC：`open_channel_with_external_funding` 和 `submit_signed_funding_tx`。
+> 功能概述：新增两个 RPC —— `open_channel_with_external_funding` 和 `submit_signed_funding_tx`，允许用户使用外部钱包签名 funding 交易来开通通道，不再要求 FNN 节点持有 CKB 私钥。
 
 ---
 
-## 一、变更范围总结
+## 环境准备
 
-### 1.1 新增核心类型与状态
-
-| 变更 | 文件 | 说明 |
-|------|------|------|
-| `ChannelState::AwaitingExternalFunding` | `crates/fiber-types/src/channel.rs` | 新增通道状态枚举变体，放在末尾以保持 bincode 序列化兼容 |
-| `ChannelFlags::EXTERNAL_FUNDING` | `crates/fiber-types/src/channel.rs` | 新增通道标志位 `1 << 2` |
-| `ExternalFundingRuntime` | `crates/fiber-lib/src/fiber/channel.rs` | 运行时状态结构：`enabled`、`signed_submitted`、`unsigned_funding_tx`、`started_at` |
-| `OpenChannelWithExternalFundingParameter` | `crates/fiber-lib/src/fiber/channel.rs` | 通道初始化参数 |
-| `ExternalFundingTxBuilder` | `crates/fiber-lib/src/ckb/funding/funding_tx.rs` | 新增外部资金交易构建器 |
-| `ExternalFundingContext` | `crates/fiber-lib/src/ckb/funding/funding_tx.rs` | 外部资金上下文（lock_script、cell_deps） |
-
-### 1.2 新增 RPC
-
-| RPC 方法 | 参数类型 | 返回类型 | 说明 |
-|----------|----------|----------|------|
-| `open_channel_with_external_funding` | `OpenChannelWithExternalFundingParams` | `OpenChannelWithExternalFundingResult` | 返回 `channel_id` 和 `unsigned_funding_tx` |
-| `submit_signed_funding_tx` | `SubmitSignedFundingTxParams` | `SubmitSignedFundingTxResult` | 提交签名后的 funding 交易 |
-
-### 1.3 核心状态转换流程
-
-```
-OpenChannelWithExternalFunding
-    │
-    ↓
-NegotiatingFunding → (协商完成)
-    │
-    ↓
-CollaboratingFundingTx → (TX协作完成, 生成 unsigned_funding_tx)
-    │
-    ↓
-AwaitingExternalFunding ← 用户需要在此阶段签名
-    │
-    ├─ submit_signed_funding_tx → 验证签名交易 → install → TxUpdate → SigningCommitment → ...
-    │
-    ├─ 如果对端先发 CommitmentSigned → SigningCommitment(THEIR_COMMITMENT_SIGNED_SENT)
-    │   └─ submit_signed_funding_tx → install (preserve_signing_state) → handle_commitment_signed_command
-    │
-    └─ 超时 → CheckFundingTimeout → AbortFunding
-```
-
-### 1.4 配置变更
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `external_funding_timeout_seconds` | 300 (5分钟) | 等待用户提交签名交易的超时时间 |
+- 至少部署 2 个 FNN 节点（以下称 **Node A**、**Node B**），已连通对等方
+- Node B 建议配置 `auto_accept_channel_ckb_funding_amount`（自动接受通道），简化测试流程
+- 准备一个外部钱包地址（有足够 CKB 余额），其 lock script 用于 `funding_lock_script`
+- 准备 `ckb-cli` 或其他签名工具，可对 CKB 交易进行签名
+- 以下所有操作通过 JSON-RPC 调用完成
 
 ---
 
-## 二、测试用例清单
+## 一、正常流程
 
-### 2.1 bincode 序列化兼容性测试
+### T-01 外部资金通道开通并获取未签名交易
 
-| 编号 | 测试用例 | 目的 | 验证点 |
-|------|----------|------|--------|
-| T-01 | `test_channel_state_bincode_compatibility` | 确保新增 `AwaitingExternalFunding` 状态不破坏已有状态的 bincode 编码 | 所有 `ChannelState` 变体的 bincode 序列化结果与预期字节序列一致，特别是 `AwaitingExternalFunding` 的 discriminant 为 8 |
+**目的**：验证 `open_channel_with_external_funding` 能正确返回 channel_id 和未签名交易
 
-**具体验证项**：
-- `NegotiatingFunding(empty)` → `[0, 0, 0, 0, 0, 0, 0, 0]`
-- `CollaboratingFundingTx(empty)` → `[1, 0, 0, 0, 0, 0, 0, 0]`
-- `SigningCommitment(empty)` → `[2, 0, 0, 0, 0, 0, 0, 0]`
-- `AwaitingTxSignatures(empty)` → `[3, 0, 0, 0, 0, 0, 0, 0]`
-- `AwaitingChannelReady(empty)` → `[4, 0, 0, 0, 0, 0, 0, 0]`
-- `ChannelReady` → `[5, 0, 0, 0]`
-- `ShuttingDown(empty)` → `[6, 0, 0, 0, 0, 0, 0, 0]`
-- `Closed(empty)` → `[7, 0, 0, 0, 0, 0, 0, 0]`
-- `AwaitingExternalFunding` → `[8, 0, 0, 0]`
+**步骤**：
+1. 确保 Node A 和 Node B 已互相连接（通过 `connect_peer`）
+2. 准备好外部钱包的 lock script（即你控制的钱包地址对应的 lock script，可通过 `ckb-cli` 或钱包 SDK 获取）
+3. 向 Node A 发送 RPC 请求：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "open_channel_with_external_funding",
+     "params": [{
+       "pubkey": "<Node B 的 pubkey>",
+       "funding_amount": "0xba43b7400",
+       "public": true,
+       "shutdown_script": { "code_hash": "...", "hash_type": "...", "args": "..." },
+       "funding_lock_script": { "code_hash": "...", "hash_type": "...", "args": "..." }
+     }]
+   }
+   ```
+4. 检查返回结果
 
----
-
-### 2.2 外部资金通道开通 - 正常流程
-
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-02 | `test_open_channel_with_external_funding` | 验证外部资金通道开通的基本流程 | node_b 启用 `auto_accept_channel` | 1. 返回有效的 `channel_id`（非默认值）<br>2. `unsigned_funding_tx` 有至少一个 output<br>3. 通道状态在提交签名前**不应被持久化**到 store 中 |
-| T-03 | `test_submit_signed_funding_tx` | 验证提交签名后的 funding 交易的正常流程 | 先通过 `open_external_funding_channel` 创建通道 | 1. 提交成功<br>2. 返回的 `tx_hash` 与签名交易的 hash 一致<br>3. 通道状态已从 `AwaitingExternalFunding` 转换到后续阶段（`CollaboratingFundingTx` / `SigningCommitment` / `AwaitingTxSignatures` / `AwaitingChannelReady`） |
-| T-04 | `test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake` | 验证提交签名交易后，发起方和接受方都能顺利完成 commitment 握手 | 先通过 `open_external_funding_channel` 创建通道 | 1. 提交成功<br>2. 发起方（node_a）进入 `AwaitingChannelReady` 或 `ChannelReady`<br>3. 接受方（node_b）也进入 `AwaitingChannelReady` 或 `ChannelReady`<br>4. 使用轮询（最多 20 次 × 100ms 和 40 次 × 100ms）等待状态转换 |
-
----
-
-### 2.3 超时处理
-
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-05 | `test_external_funding_timeout_abort` | 验证外部资金等待超时后通道被正确中止 | node_a 的 `external_funding_timeout_seconds` 设为 1 秒，node_b 启用 auto_accept | 1. 开通外部资金通道后不提交签名交易<br>2. 等待 `ChannelFundingAborted` 事件触发<br>3. 确认通道被中止 |
-| T-06 | `test_external_funding_signed_submission_not_aborted_by_stale_timeout` | 验证已经成功提交签名交易后，过期的超时事件不会中止通道 | node_a 设 `external_funding_timeout_seconds=1` 和 `funding_timeout_seconds=10` | 1. 开通外部资金通道<br>2. 立即提交签名交易（在 1 秒超时前）<br>3. 等待 2 秒后<br>4. 通道状态仍然存在于 store 中，没有被过期的 external funding timeout 中止 |
+**预期结果**：
+- 返回 `result.channel_id`：非空的 32 字节 hex 字符串
+- 返回 `result.unsigned_funding_tx`：一个完整的 CKB Transaction JSON 对象
+- `unsigned_funding_tx.outputs` 至少包含一个 output
+- `unsigned_funding_tx.witnesses` 为空或全零（未签名状态）
 
 ---
 
-### 2.4 错误处理 - 状态检查
+### T-02 提交签名交易，完成通道开通
 
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-07 | `test_submit_signed_funding_tx_wrong_state` | 验证对非外部资金通道提交签名交易会被拒绝 | 使用普通 `OpenChannel` 开通通道 | 1. 提交失败<br>2. 错误信息包含 "AwaitingExternalFunding" 或 "InvalidState" |
-| T-08 | `test_submit_signed_funding_tx_duplicate` | 验证重复提交签名交易会被拒绝 | 先成功提交一次签名交易 | 1. 第一次提交成功<br>2. 第二次提交失败<br>3. 错误信息包含 "already been submitted"、"InvalidState" 或 "AwaitingExternalFunding" |
+**目的**：验证 `submit_signed_funding_tx` 能正确接受签名后的交易并推进通道状态
 
----
+**前提**：已完成 T-01，拿到 `channel_id` 和 `unsigned_funding_tx`
 
-### 2.5 错误处理 - 交易验证
+**步骤**：
+1. 使用外部钱包/`ckb-cli` 对 `unsigned_funding_tx` 进行签名，得到带 witnesses 的签名交易
+   - 注意：**不能修改交易的 inputs、outputs、outputs_data**，只能添加 witnesses
+2. 向 Node A 发送 RPC 请求：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "submit_signed_funding_tx",
+     "params": [{
+       "channel_id": "<T-01 返回的 channel_id>",
+       "signed_funding_tx": { <签名后的完整交易 JSON> }
+     }]
+   }
+   ```
+3. 检查返回结果
+4. 通过 `list_channels` 查询通道状态
 
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-09 | `test_submit_signed_funding_tx_output_mismatch` | 验证提交的签名交易 output 与原始 unsigned tx 不一致时被拒绝 | 开通外部资金通道 | 1. 构造一个 output 不同的交易<br>2. 提交失败<br>3. 错误信息包含 "mismatch" 或 "InvalidParameter" |
-| T-10 | `test_submit_signed_funding_tx_input_count_mismatch` | 验证提交的签名交易 input 数量与原始 unsigned tx 不一致时被拒绝 | 开通外部资金通道 | 1. 在 unsigned tx 基础上额外添加一个 input<br>2. 提交失败<br>3. 错误信息包含 "Input count mismatch" 或 "mismatch" |
-
----
-
-### 2.6 参数验证
-
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-11 | `test_external_funding_invalid_tlc_expiry_delta` | 验证使用过小的 TLC expiry delta 开通外部资金通道会被拒绝 | 两个互连节点 | 1. 使用 `tlc_expiry_delta=1`（远小于 MIN_TLC_EXPIRY_DELTA）<br>2. 开通失败<br>3. 错误信息包含 "TLC expiry delta" |
-| T-12 | `test_external_funding_invalid_commitment_delay` | 验证使用过小的 commitment delay epoch 开通外部资金通道会被拒绝 | 两个互连节点 | 1. 使用 `commitment_delay_epoch = EpochNumberWithFraction::new(0, 0, 1)`<br>2. 开通失败<br>3. 错误信息包含 "commitment delay" 或 "Commitment delay" |
-
----
-
-### 2.7 通道生命周期 - 异常中止
-
-| 编号 | 测试用例 | 目的 | 前提条件 | 验证点 |
-|------|----------|------|----------|--------|
-| T-13 | `test_external_funding_pending_reply_returns_error_when_channel_stops` | 验证当通道在等待外部资金时被中止（abandon），pending 的 RPC 调用能正确返回错误 | 两个互连节点（不启用 auto_accept） | 1. 在单独的异步任务中发起 `OpenChannelWithExternalFunding`（因为没有 auto_accept，会阻塞等待）<br>2. 等待 `ChannelCreated` 事件获取临时 channel_id<br>3. 调用 `AbandonChannel` 中止通道<br>4. 验证 `OpenChannelWithExternalFunding` 的 pending reply 返回错误<br>5. 错误信息包含 "stopped before unsigned external funding tx was returned" |
+**预期结果**：
+- 返回 `result.channel_id`：与提交时一致
+- 返回 `result.funding_tx_hash`：非空，为签名交易的 hash
+- 通过 Node A 的 `list_channels` 查询，通道状态不再是 `AwaitingExternalFunding`，已推进到后续阶段
 
 ---
 
-## 三、PR 中已包含的测试与建议补充
+### T-03 通道完整生命周期：开通 → 支付 → 关闭
 
-### 3.1 PR 已包含的测试
+**目的**：验证外部资金通道从开通到关闭的完整流程
 
-PR 在 `crates/fiber-lib/src/fiber/tests/channel.rs` 中新增了以下 12 个测试：
+**前提**：Node B 启用 `auto_accept_channel_ckb_funding_amount`
 
-| 类别 | 测试函数 | 对应编号 |
-|------|----------|----------|
-| 序列化 | `test_channel_state_bincode_compatibility` | T-01 |
-| 正常流程 | `test_open_channel_with_external_funding` | T-02 |
-| 正常流程 | `test_submit_signed_funding_tx` | T-03 |
-| 正常流程 | `test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake` | T-04 |
-| 超时 | `test_external_funding_timeout_abort` | T-05 |
-| 超时 | `test_external_funding_signed_submission_not_aborted_by_stale_timeout` | T-06 |
-| 错误-状态 | `test_submit_signed_funding_tx_wrong_state` | T-07 |
-| 错误-状态 | `test_submit_signed_funding_tx_duplicate` | T-08 |
-| 错误-交易 | `test_submit_signed_funding_tx_output_mismatch` | T-09 |
-| 错误-交易 | `test_submit_signed_funding_tx_input_count_mismatch` | T-10 |
-| 参数验证 | `test_external_funding_invalid_tlc_expiry_delta` | T-11 |
-| 参数验证 | `test_external_funding_invalid_commitment_delay` | T-12 |
-| 生命周期 | `test_external_funding_pending_reply_returns_error_when_channel_stops` | T-13 |
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding` 开通通道，获取 `channel_id` 和 `unsigned_funding_tx`
+2. 使用外部钱包签名交易
+3. Node A 调用 `submit_signed_funding_tx` 提交签名交易
+4. 生成若干区块（使 funding 交易上链确认）
+5. 轮询 `list_channels` 等待双方通道状态变为 `ChannelReady`（建议轮询间隔 1-2 秒，最多等 60 秒）
+6. Node B 调用 `new_invoice` 生成 invoice
+7. Node A 调用 `send_payment` 使用该 invoice 向 Node B 支付
+8. Node A 调用 `shutdown_channel` 关闭通道
+9. 生成若干区块（使关闭交易上链确认）
+10. 通过 `list_channels`（带 `include_closed: true`）查看通道状态
 
-此外还包含：
-- `crates/fiber-wasm/tests/optional_params.rs`（WASM 可选参数测试）
-- `tests/bruno/e2e/external-funding-open/`（端到端测试，需手动执行）
-
-### 3.2 建议补充的测试用例
-
-以下是 PR 当前未覆盖但值得补充的测试场景：
-
-| 编号 | 建议测试用例 | 类别 | 说明 |
-|------|------------|------|------|
-| T-14 | `test_submit_signed_funding_tx_cell_dep_mismatch` | 交易验证 | 验证 `cell_deps` 被篡改时是否被拒绝（当前 `validate_external_funding_signed_tx` 未显式校验 cell_deps） |
-| T-15 | `test_submit_signed_funding_tx_output_data_mismatch` | 交易验证 | 验证 `outputs_data` 被篡改时是否被正确拒绝（代码中有此验证，但无对应测试） |
-| T-16 | `test_submit_signed_funding_tx_input_previous_output_mismatch` | 交易验证 | 验证某个 input 的 `previous_output` 被篡改时是否被拒绝（代码中有逐个 input 的 previous_output 校验） |
-| T-17 | `test_external_funding_with_udt` | 功能覆盖 | 验证使用 UDT（自定义 token）类型的外部资金通道开通和签名提交流程 |
-| T-18 | `test_external_funding_with_custom_cell_deps` | 功能覆盖 | 验证 `funding_lock_script_cell_deps` 参数是否被正确传递和使用 |
-| T-19 | `test_external_funding_not_final_tx` | 交易验证 | 验证签名交易未达到 "final" 状态时被拒绝（代码中有 `is_tx_final` 校验） |
-| T-20 | `test_external_funding_channel_not_found_on_submit` | 错误处理 | 验证 `submit_signed_funding_tx` 使用不存在的 `channel_id` 时的错误处理 |
-| T-21 | `test_external_funding_channel_restart_recovery` | 持久化 | 验证在 `AwaitingExternalFunding` 状态下节点重启后的恢复行为（`should_persist_channel_state` 在 `enabled && !signed_submitted` 时返回 false，所以重启应丢失此通道） |
-| T-22 | `test_external_funding_acceptor_side_state` | 对端行为 | 验证接受方（non-initiator）在对端使用外部资金时的状态转换和行为是否正确 |
-| T-23 | `test_external_funding_concurrent_operations` | 并发 | 验证在 `AwaitingExternalFunding` 状态下同时发送其他通道命令（如 shutdown）的行为 |
-| T-24 | `test_external_funding_abandon_channel` | 生命周期 | 验证在 `AwaitingExternalFunding` 状态下调用 `AbandonChannel` 能正确中止通道（`can_abort_funding` 已包含此状态） |
-| T-25 | `test_external_funding_peer_commitment_signed_race` | 竞态条件 | 验证对端在 `AwaitingExternalFunding` 时提前发送 `CommitmentSigned`，然后用户提交签名交易的完整流程（代码中有处理此场景的逻辑） |
-| T-26 | `test_open_channel_with_external_funding_rpc_serialization` | RPC | 验证 `OpenChannelWithExternalFundingParams` 和 `SubmitSignedFundingTxParams` 的 JSON 序列化/反序列化，确保 `unsigned_funding_tx` 和 `signed_funding_tx` 作为 JSON object 正确处理 |
-| T-27 | `test_external_funding_public_channel` | 功能覆盖 | 验证外部资金通道设为 public（`public=true`）时的行为，确保 `EXTERNAL_FUNDING` flag 与 `PUBLIC` flag 可以共存 |
-| T-28 | `test_external_funding_shutdown_script_required` | 参数验证 | 验证 `shutdown_script` 为空/无效时的处理（外部资金通道要求提供 shutdown_script） |
+**预期结果**：
+- 步骤 5：双方通道状态最终变为 `ChannelReady`
+- 步骤 7：支付成功，无错误返回
+- 步骤 10：通道状态变为 `Closed`
+- 检查余额变化：发起方的外部钱包余额减少（funding amount + 手续费），接收方余额增加（收到支付金额）
 
 ---
 
-## 四、验证逻辑详细分析
+### T-04 提交签名后双方均进入就绪状态
 
-### 4.1 `validate_external_funding_signed_tx` 验证清单
+**目的**：验证提交签名交易后，发起方和接受方都能顺利完成 commitment 握手并最终进入 ChannelReady
 
-此函数是签名交易验证的核心，按以下顺序检查：
+**前提**：Node B 启用 auto_accept
 
-| 步骤 | 检查项 | 错误类型 | 测试覆盖 |
-|------|--------|----------|----------|
-| 1 | `external_funding.enabled == true` | `InvalidState` | T-07 |
-| 2 | `unsigned_funding_tx` 存在 | `InvalidState` | 隐式覆盖 |
-| 3 | input 数量一致 | `InvalidParameter` | T-10 |
-| 4 | 每个 input 的 `previous_output` 一致 | `InvalidParameter` | 建议 T-16 |
-| 5 | output 数量一致 | `InvalidParameter` | T-09 |
-| 6 | 每个 output 的内容一致 | `InvalidParameter` | T-09 |
-| 7 | output data 数量一致 | `InvalidParameter` | 建议 T-15 |
-| 8 | 每个 output data 的内容一致 | `InvalidParameter` | 建议 T-15 |
-| 9 | `is_tx_final` 为 true | `InvalidParameter` | 建议 T-19 |
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding`
+2. 签名 `unsigned_funding_tx`
+3. Node A 调用 `submit_signed_funding_tx`
+4. 生成若干区块
+5. 分别在 Node A 和 Node B 上轮询 `list_channels`
 
-### 4.2 状态持久化策略
-
-```rust
-fn should_persist_channel_state(&self, state: &ChannelActorState) -> bool {
-    let external_funding = &state.ephemeral_config.external_funding;
-    !external_funding.enabled || external_funding.signed_submitted
-}
-```
-
-- 普通通道（`enabled=false`）：始终持久化 → `true`
-- 外部资金通道 `AwaitingExternalFunding`（`enabled=true, signed_submitted=false`）：**不持久化** → `false`
-- 外部资金通道签名提交后（`enabled=true, signed_submitted=true`）：持久化 → `true`
-
-### 4.3 超时处理逻辑
-
-```rust
-fn has_funding_timeout_elapsed(&self) -> bool
-```
-
-超时判定规则：
-- **外部资金超时**：`current_time - started_at > external_funding_timeout_seconds`
-  - 其中 `started_at` 是存储 unsigned funding tx 时记录的时间戳
-  - 默认超时时间为 300 秒（5 分钟）
-- **常规 funding 超时**：`current_time - created_at > funding_timeout_seconds`
-  - 其中 `created_at` 是通道创建时间
-  - 默认超时时间为 86400 秒（1 天）
-- 超时事件到达时，只有当前适用的超时确实已过期才中止通道，避免过期（stale）的超时事件影响已进入下一阶段的通道
-- 当 `signed_submitted=true` 后，`started_at` 被清空，此后不再触发外部资金超时，而是回退到常规 funding 超时逻辑
+**预期结果**：
+- Node A 端通道状态最终变为 `AwaitingChannelReady` 或 `ChannelReady`
+- Node B 端通道状态也最终变为 `AwaitingChannelReady` 或 `ChannelReady`
 
 ---
 
-## 五、e2e 测试
+## 二、错误处理 - 交易验证
 
-PR 包含手动 e2e 测试脚本，位于 `tests/bruno/e2e/external-funding-open/`：
+### T-05 提交 output 被篡改的交易
 
-```bash
-# 启动节点
-REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/external-funding-open
+**目的**：验证签名交易的 outputs 与原始 unsigned tx 不一致时被拒绝
 
-# 等待节点初始化
-./tests/nodes/wait.sh
+**前提**：已完成 `open_channel_with_external_funding` 获取 `channel_id` 和 `unsigned_funding_tx`
 
-# 执行成功流程测试
-./tests/bruno/e2e/external-funding-open/run-success-flow.sh
-```
+**步骤**：
+1. 手动构造一个交易 JSON，**修改其中一个 output 的 capacity 或 lock script**（与 `unsigned_funding_tx` 不同）
+2. 对此篡改后的交易进行签名
+3. 调用 `submit_signed_funding_tx` 提交
 
-e2e 测试步骤：
-1. 连接两个节点
-2. 获取 node1 和 node3 的 funding script
-3. 获取 node1 开通前的余额
-4. 调用 `open_channel_with_external_funding` 并获取 unsigned tx
-5. 使用 ckb-cli 签名交易
-6. 调用 `submit_signed_funding_tx` 提交签名交易
-7. 等待通道就绪
-8. 验证通道列表
-9. 验证余额变化
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "mismatch" 相关描述
 
 ---
 
-## 六、测试辅助设施
+### T-06 提交 input 数量不一致的交易
 
-PR 新增了以下测试辅助函数：
+**目的**：验证签名交易的 input 数量与原始 unsigned tx 不一致时被拒绝
 
-| 函数 | 文件 | 说明 |
-|------|------|------|
-| `new_2_nodes_with_auto_accept()` | `tests/channel.rs` | 创建两个互连节点，node_b 启用 auto_accept |
-| `open_external_funding_channel()` | `tests/channel.rs` | 调用 `OpenChannelWithExternalFunding` 并返回 `(channel_id, unsigned_tx)` |
-| `NetworkNodeConfigBuilder` | `test_utils.rs` | 新增配置构建器，支持自定义 fiber config |
+**前提**：已完成 `open_channel_with_external_funding` 获取 `channel_id` 和 `unsigned_funding_tx`
 
-`NetworkNodeConfigBuilder` 提供了灵活的节点配置能力：
-- `.node_name()` - 设置节点名称
-- `.base_dir_prefix()` - 设置临时目录前缀
-- `.fiber_config_updater()` - 通过闭包自定义 FiberConfig
+**步骤**：
+1. 在 `unsigned_funding_tx` 的 `inputs` 数组中额外添加一个 input
+2. 对此篡改后的交易进行签名
+3. 调用 `submit_signed_funding_tx` 提交
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "Input count mismatch" 相关描述
+
+---
+
+### T-07 提交 output_data 被篡改的交易
+
+**目的**：验证签名交易的 outputs_data 被修改时被拒绝
+
+**前提**：已完成 `open_channel_with_external_funding`
+
+**步骤**：
+1. 修改 `unsigned_funding_tx` 中某个 `outputs_data` 条目的内容
+2. 签名并提交
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "mismatch" 相关描述
+
+---
+
+### T-08 提交 input 的 previous_output 被篡改的交易
+
+**目的**：验证签名交易中某个 input 的 `previous_output`（tx_hash 或 index）与原始 unsigned tx 不一致时被拒绝
+
+**前提**：已完成 `open_channel_with_external_funding`
+
+**步骤**：
+1. 修改 `unsigned_funding_tx` 中某个 input 的 `previous_output.tx_hash` 或 `previous_output.index`
+2. 签名并提交
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "previous_output mismatch" 相关描述
+
+---
+
+## 三、错误处理 - 状态检查
+
+### T-09 对普通通道调用 submit_signed_funding_tx
+
+**目的**：验证对非外部资金通道提交签名交易会被拒绝
+
+**步骤**：
+1. 使用普通 `open_channel` RPC 开通一个通道，获取 `channel_id`
+2. 构造一个任意的交易 JSON
+3. 调用 `submit_signed_funding_tx`：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "submit_signed_funding_tx",
+     "params": [{
+       "channel_id": "<普通通道的 channel_id>",
+       "signed_funding_tx": { <任意交易> }
+     }]
+   }
+   ```
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "AwaitingExternalFunding" 或 "InvalidState"
+
+---
+
+### T-10 重复提交签名交易
+
+**目的**：验证对同一通道重复提交签名交易会被拒绝
+
+**前提**：已完成外部资金通道开通并成功提交过一次签名交易
+
+**步骤**：
+1. 使用与第一次相同的签名交易，再次调用 `submit_signed_funding_tx`
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "already been submitted" 或 "InvalidState"
+
+---
+
+### T-11 对不存在的 channel_id 调用 submit_signed_funding_tx
+
+**目的**：验证使用无效的 channel_id 时的错误处理
+
+**步骤**：
+1. 构造一个不存在的 channel_id（32 字节随机 hex）
+2. 调用 `submit_signed_funding_tx`
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息指示通道不存在
+
+---
+
+## 四、参数验证
+
+### T-12 使用过小的 tlc_expiry_delta 开通通道
+
+**目的**：验证 `tlc_expiry_delta` 太小时 RPC 会拒绝
+
+**步骤**：
+1. 调用 `open_channel_with_external_funding`，设置 `tlc_expiry_delta` 为 `"0x1"`（远小于要求的最小值）
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "open_channel_with_external_funding",
+     "params": [{
+       "pubkey": "<Node B pubkey>",
+       "funding_amount": "0xba43b7400",
+       "shutdown_script": { ... },
+       "funding_lock_script": { ... },
+       "tlc_expiry_delta": "0x1"
+     }]
+   }
+   ```
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "TLC expiry delta" 相关描述
+
+---
+
+### T-13 使用过小的 commitment_delay_epoch 开通通道
+
+**目的**：验证 `commitment_delay_epoch` 为 0 或过小时 RPC 会拒绝
+
+**步骤**：
+1. 调用 `open_channel_with_external_funding`，设置 `commitment_delay_epoch` 为 `"0x0"`
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "open_channel_with_external_funding",
+     "params": [{
+       "pubkey": "<Node B pubkey>",
+       "funding_amount": "0xba43b7400",
+       "shutdown_script": { ... },
+       "funding_lock_script": { ... },
+       "commitment_delay_epoch": "0x0"
+     }]
+   }
+   ```
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "commitment delay" 相关描述
+
+---
+
+## 五、超时与生命周期
+
+### T-14 外部资金等待超时后通道自动中止
+
+**目的**：验证在超时时间内未提交签名交易时，通道被自动中止
+
+**前提**：Node A 配置 `external_funding_timeout_seconds` 为较短时间（例如 60 秒）
+
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding` 获取 `channel_id` 和 `unsigned_funding_tx`
+2. **不进行签名和提交**，等待超过超时时间
+3. 通过 `list_channels` 查询该通道
+
+**预期结果**：
+- 超时后通道被自动中止
+- `list_channels` 中该通道不再存在，或状态显示已关闭/中止
+
+---
+
+### T-15 已提交签名后超时事件不影响通道
+
+**目的**：验证已经成功提交签名交易后，即使之前调度的超时事件触发，通道不会被错误中止
+
+**前提**：Node A 配置 `external_funding_timeout_seconds` 为较短时间（例如 60 秒）
+
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding`
+2. 立即签名并调用 `submit_signed_funding_tx`（在超时时间之前）
+3. 等待超过 `external_funding_timeout_seconds`
+4. 通过 `list_channels` 查询通道状态
+
+**预期结果**：
+- 通道仍然存在
+- 通道状态正常推进，没有被超时中止
+
+---
+
+### T-16 在等待签名阶段主动中止通道
+
+**目的**：验证在 `AwaitingExternalFunding` 状态下可以通过 `abandon_channel` 主动中止通道
+
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding`，获取 `channel_id`
+2. 不签名，直接调用 `abandon_channel`：
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "method": "abandon_channel",
+     "params": [{ "channel_id": "<channel_id>" }]
+   }
+   ```
+3. 通过 `list_channels` 确认通道状态
+
+**预期结果**：
+- `abandon_channel` 调用成功
+- 通道被中止，`list_channels` 中不再出现该通道
+
+---
+
+### T-17 节点重启后 AwaitingExternalFunding 状态的通道丢失
+
+**目的**：验证在等待外部签名阶段重启节点后，该通道不会被恢复（设计上此阶段不持久化）
+
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding`，获取 `channel_id`
+2. **不提交签名交易**
+3. 重启 Node A
+4. 通过 `list_channels` 查询
+
+**预期结果**：
+- 重启后该通道不存在于 `list_channels` 结果中
+- 设计意图：`AwaitingExternalFunding` 阶段的通道不会持久化到磁盘
+
+---
+
+## 六、功能覆盖
+
+### T-18 开通公共通道（public=true）
+
+**目的**：验证外部资金通道可以设为公共通道
+
+**步骤**：
+1. 调用 `open_channel_with_external_funding`，设置 `public: true`
+2. 完成签名并提交
+3. 等待通道就绪后，通过 `list_channels` 查看通道信息
+
+**预期结果**：
+- 通道开通成功
+- 通道信息中显示该通道为公共通道
+
+---
+
+### T-19 使用自定义 funding_lock_script_cell_deps
+
+**目的**：验证 `funding_lock_script_cell_deps` 参数能被正确使用
+
+**步骤**：
+1. 准备一个需要额外 cell dep 的自定义 lock script（例如非默认钱包锁脚本）
+2. 调用 `open_channel_with_external_funding`，设置 `funding_lock_script_cell_deps`：
+   ```json
+   {
+     "funding_lock_script": { <自定义 lock script> },
+     "funding_lock_script_cell_deps": [
+       {
+         "out_point": { "tx_hash": "0x...", "index": "0x0" },
+         "dep_type": "code"
+       }
+     ]
+   }
+   ```
+3. 检查返回的 `unsigned_funding_tx` 的 `cell_deps` 字段
+
+**预期结果**：
+- 返回的 `unsigned_funding_tx.cell_deps` 中包含了用户指定的额外 cell deps
+
+---
+
+### T-20 与已有 open_channel 流程的兼容性
+
+**目的**：验证新增的外部资金功能不影响已有的普通 `open_channel` 流程
+
+**步骤**：
+1. 使用普通 `open_channel` RPC 开通一个通道
+2. 等待通道就绪
+3. 进行支付
+4. 关闭通道
+
+**预期结果**：
+- 所有步骤正常完成，无任何行为变化
+- 已有 `open_channel` 流程不受影响
+
+---
+
+## 七、通道状态观察
+
+### T-21 提交签名前通过 list_channels 查看通道状态
+
+**目的**：验证在提交签名前通道的状态展示
+
+**步骤**：
+1. Node A 调用 `open_channel_with_external_funding`
+2. **不提交签名**，立即在 Node A 和 Node B 上分别调用 `list_channels`
+
+**预期结果**：
+- 两种可能结果都是正确的：
+  - 通道尚未出现在 `list_channels` 结果中（因为此阶段不持久化）
+  - 或通道出现但状态为 `AwaitingExternalFunding`
+
+---
+
+## 测试用例汇总
+
+| 编号 | 类别 | 用例名称 | 优先级 |
+|------|------|----------|--------|
+| T-01 | 正常流程 | 外部资金通道开通并获取未签名交易 | P0 |
+| T-02 | 正常流程 | 提交签名交易完成通道开通 | P0 |
+| T-03 | 正常流程 | 完整生命周期：开通→支付→关闭 | P0 |
+| T-04 | 正常流程 | 提交签名后双方均进入就绪状态 | P0 |
+| T-05 | 交易验证 | 提交 output 被篡改的交易 | P1 |
+| T-06 | 交易验证 | 提交 input 数量不一致的交易 | P1 |
+| T-07 | 交易验证 | 提交 output_data 被篡改的交易 | P1 |
+| T-08 | 交易验证 | 提交 input 的 previous_output 被篡改的交易 | P1 |
+| T-09 | 状态检查 | 对普通通道调用 submit_signed_funding_tx | P1 |
+| T-10 | 状态检查 | 重复提交签名交易 | P1 |
+| T-11 | 状态检查 | 对不存在的 channel_id 调用 submit | P1 |
+| T-12 | 参数验证 | 使用过小的 tlc_expiry_delta | P1 |
+| T-13 | 参数验证 | 使用过小的 commitment_delay_epoch | P1 |
+| T-14 | 超时/生命周期 | 外部资金等待超时后通道自动中止 | P1 |
+| T-15 | 超时/生命周期 | 已提交签名后超时事件不影响通道 | P2 |
+| T-16 | 超时/生命周期 | 等待签名阶段主动中止通道 | P1 |
+| T-17 | 超时/生命周期 | 节点重启后通道丢失 | P2 |
+| T-18 | 功能覆盖 | 开通公共通道 | P2 |
+| T-19 | 功能覆盖 | 使用自定义 cell deps | P2 |
+| T-20 | 功能覆盖 | 与已有 open_channel 流程的兼容性 | P1 |
+| T-21 | 状态观察 | 提交签名前查看通道状态 | P2 |
