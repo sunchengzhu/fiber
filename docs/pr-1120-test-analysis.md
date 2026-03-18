@@ -1,6 +1,6 @@
 # PR #1120 集成测试用例：支持外部钱包签名的通道资金注入
 
-> PR: https://github.com/nervosnetwork/fiber/pull/1120
+> PR: https://github.com/nervosnetwork/fiber/pull/1120  
 > 功能概述：新增两个 RPC —— `open_channel_with_external_funding` 和 `submit_signed_funding_tx`，允许用户使用外部钱包签名 funding 交易来开通通道，不再要求 FNN 节点持有 CKB 私钥。
 
 ---
@@ -41,10 +41,10 @@
 4. 检查返回结果
 
 **预期结果**：
-- 返回 `result.channel_id`：非空的 32 字节 hex 字符串
+- 返回 `result.channel_id`：非空的 32 字节 hex 字符串（`0x` 前缀 + 64 位十六进制）
 - 返回 `result.unsigned_funding_tx`：一个完整的 CKB Transaction JSON 对象
 - `unsigned_funding_tx.outputs` 至少包含一个 output
-- `unsigned_funding_tx.witnesses` 为空或全零（未签名状态）
+- `unsigned_funding_tx.witnesses` 为占位见证（placeholder）：通常存在，但签名区为全零（未签名状态）
 
 ---
 
@@ -55,8 +55,8 @@
 **前提**：已完成 T-01，拿到 `channel_id` 和 `unsigned_funding_tx`
 
 **步骤**：
-1. 使用外部钱包/`ckb-cli` 对 `unsigned_funding_tx` 进行签名，得到带 witnesses 的签名交易
-   - 注意：**不能修改交易的 inputs、outputs、outputs_data**，只能添加 witnesses
+1. 使用外部钱包/`ckb-cli` 对 `unsigned_funding_tx` 进行签名，得到带 witnesses 的签名交易  
+   - 注意：**不能修改交易的 inputs、outputs、outputs_data**，只能**替换**占位 witnesses 为真实签名 witnesses
 2. 向 Node A 发送 RPC 请求：
    ```json
    {
@@ -64,7 +64,7 @@
      "method": "submit_signed_funding_tx",
      "params": [{
        "channel_id": "<T-01 返回的 channel_id>",
-       "signed_funding_tx": { <签名后的完整交易 JSON> }
+       "signed_funding_tx": { "<签名后的完整交易 JSON>": "..." }
      }]
    }
    ```
@@ -100,7 +100,8 @@
 - 步骤 5：双方通道状态最终变为 `ChannelReady`
 - 步骤 7：支付成功，无错误返回
 - 步骤 10：通道状态变为 `Closed`
-- 检查余额变化：发起方的外部钱包余额减少（funding amount + 手续费），接收方余额增加（收到支付金额）
+- 检查通道内余额变化：通过 `list_channels` 返回的 `local_balance` / `remote_balance` 验证支付金额转移
+- 检查链上余额变化：通过 `ckb-cli` 或 CKB RPC 查询外部钱包地址余额，验证 funding amount + 手续费扣减
 
 ---
 
@@ -191,6 +192,39 @@
 
 ---
 
+### T-22 提交 output 数量不一致的交易
+
+**目的**：验证签名交易的 output 数量与原始 unsigned tx 不一致时被拒绝（数量维度）
+
+**前提**：已完成 `open_channel_with_external_funding` 获取 `channel_id` 和 `unsigned_funding_tx`
+
+**步骤**：
+1. 在 `unsigned_funding_tx.outputs` 中增加或删除一个 output（并同步调整 `outputs_data` 长度，避免触发其他校验）
+2. 对此篡改后的交易进行签名
+3. 调用 `submit_signed_funding_tx` 提交
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "Output count mismatch" 或等价 mismatch 描述
+
+---
+
+### T-23 提交 output_data 数量不一致的交易
+
+**目的**：验证签名交易 `outputs_data` 数组长度与 `outputs` 不匹配时被拒绝（数量维度）
+
+**前提**：已完成 `open_channel_with_external_funding`
+
+**步骤**：
+1. 删除或新增一个 `outputs_data` 条目，使长度与 `outputs` 不一致
+2. 签名并提交
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 mismatch 相关描述
+
+---
+
 ## 三、错误处理 - 状态检查
 
 ### T-09 对普通通道调用 submit_signed_funding_tx
@@ -207,7 +241,7 @@
      "method": "submit_signed_funding_tx",
      "params": [{
        "channel_id": "<普通通道的 channel_id>",
-       "signed_funding_tx": { <任意交易> }
+       "signed_funding_tx": { "<任意交易>": "..." }
      }]
    }
    ```
@@ -255,19 +289,6 @@
 
 **步骤**：
 1. 调用 `open_channel_with_external_funding`，设置 `tlc_expiry_delta` 为 `"0x1"`（远小于要求的最小值）
-   ```json
-   {
-     "jsonrpc": "2.0",
-     "method": "open_channel_with_external_funding",
-     "params": [{
-       "pubkey": "<Node B pubkey>",
-       "funding_amount": "0xba43b7400",
-       "shutdown_script": { ... },
-       "funding_lock_script": { ... },
-       "tlc_expiry_delta": "0x1"
-     }]
-   }
-   ```
 
 **预期结果**：
 - RPC 返回错误
@@ -281,23 +302,37 @@
 
 **步骤**：
 1. 调用 `open_channel_with_external_funding`，设置 `commitment_delay_epoch` 为 `"0x0"`
-   ```json
-   {
-     "jsonrpc": "2.0",
-     "method": "open_channel_with_external_funding",
-     "params": [{
-       "pubkey": "<Node B pubkey>",
-       "funding_amount": "0xba43b7400",
-       "shutdown_script": { ... },
-       "funding_lock_script": { ... },
-       "commitment_delay_epoch": "0x0"
-     }]
-   }
-   ```
 
 **预期结果**：
 - RPC 返回错误
 - 错误信息包含 "commitment delay" 相关描述
+
+---
+
+### T-24 使用过小的 funding_amount 开通通道
+
+**目的**：验证 `funding_amount` 为 0 或低于最小占用容量时会被拒绝
+
+**步骤**：
+1. 调用 `open_channel_with_external_funding`，设置 `funding_amount` 为 `"0x0"`（或极小值）
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "funding" / "capacity" 相关描述
+
+---
+
+### T-25 未连接 peer 时调用 open_channel_with_external_funding
+
+**目的**：验证未建立 peer 连接时的前置条件校验
+
+**步骤**：
+1. 确保 Node A 与目标 Node B 未连接
+2. 调用 `open_channel_with_external_funding`
+
+**预期结果**：
+- RPC 返回错误
+- 错误信息包含 "peer" / "connect" 相关描述
 
 ---
 
@@ -344,14 +379,7 @@
 
 **步骤**：
 1. Node A 调用 `open_channel_with_external_funding`，获取 `channel_id`
-2. 不签名，直接调用 `abandon_channel`：
-   ```json
-   {
-     "jsonrpc": "2.0",
-     "method": "abandon_channel",
-     "params": [{ "channel_id": "<channel_id>" }]
-   }
-   ```
+2. 不签名，直接调用 `abandon_channel`
 3. 通过 `list_channels` 确认通道状态
 
 **预期结果**：
@@ -399,18 +427,7 @@
 
 **步骤**：
 1. 准备一个需要额外 cell dep 的自定义 lock script（例如非默认钱包锁脚本）
-2. 调用 `open_channel_with_external_funding`，设置 `funding_lock_script_cell_deps`：
-   ```json
-   {
-     "funding_lock_script": { <自定义 lock script> },
-     "funding_lock_script_cell_deps": [
-       {
-         "out_point": { "tx_hash": "0x...", "index": "0x0" },
-         "dep_type": "code"
-       }
-     ]
-   }
-   ```
+2. 调用 `open_channel_with_external_funding`，设置 `funding_lock_script_cell_deps`
 3. 检查返回的 `unsigned_funding_tx` 的 `cell_deps` 字段
 
 **预期结果**：
@@ -476,6 +493,10 @@
 | T-19 | 功能覆盖 | 使用自定义 cell deps | P2 |
 | T-20 | 功能覆盖 | 与已有 open_channel 流程的兼容性 | P1 |
 | T-21 | 状态观察 | 提交签名前查看通道状态 | P2 |
+| T-22 | 交易验证 | 提交 output 数量不一致的交易 | P1 |
+| T-23 | 交易验证 | 提交 output_data 数量不一致的交易 | P1 |
+| T-24 | 参数验证 | 使用过小的 funding_amount | P1 |
+| T-25 | 前置条件 | 未连接 peer 时调用 | P1 |
 
 ---
 
@@ -501,15 +522,6 @@ PR #1120 在 `crates/fiber-lib/src/fiber/tests/channel.rs` 中新增了 13 个�
 
 ### 不需要补充的单元测试说明
 
-**`test_channel_state_bincode_compatibility`**：验证 `ChannelState` 枚举（含新增的 `AwaitingExternalFunding`）的 bincode 序列化字节与预期一致。这是纯粹的内部数据序列化测试，没有对应的 RPC 接口可以通过集成测试验证，也不影响外部可观测行为。
+**`test_channel_state_bincode_compatibility`**：验证 `ChannelState` 枚举（含新增的 `AwaitingExternalFunding`）的 bincode 序列化字节与预期一致。这是纯内部数据兼容性测试，没有对应 RPC 接口可直接验证。
 
-**`test_external_funding_pending_reply_returns_error_when_channel_stops`**：验证当 Node B 未启用 auto_accept 时，`open_channel_with_external_funding` 的 RPC 调用会阻塞等待对方接受；此时若通过 `abandon_channel` 中止通道，阻塞中的 RPC 调用应返回错误。在集成测试中难以复现此场景，原因是：
-1. `open_channel_with_external_funding` RPC 调用是阻塞的（不返回直到对方接受或出错）
-2. 需要在 RPC 阻塞期间获取临时 channel_id，但该 ID 只通过内部事件暴露，无法通过 RPC 获取
-3. 需要同时发起另一个 RPC 调用（`abandon_channel`），但第一个调用尚未返回 channel_id
-
-这是一个内部 actor 消息传递的边界条件测试，通过单元测试覆盖更为合适。
-
-### 结论
-
-**无需补充新的集成测试用例。** 现有 21 个集成测试用例（T-01 至 T-21）已覆盖了 PR 中所有可通过 RPC 接口验证的场景。剩余 2 个未覆盖的单元测试（bincode 兼容性、pending reply 错误处理）属于内部实现细节，不适合也不需要通过集成测试验证。
+**`test_external_funding_pending_reply_returns_error_when_channel_stops`**：该场景依赖 actor 内部时序（阻塞中的 pending reply + 通道中止）和内部临时 channel_id 的生命周期，集成测试通过 RPC 很难稳定复现，单元测试覆盖更合适。
