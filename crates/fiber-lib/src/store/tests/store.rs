@@ -1,6 +1,6 @@
 use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
-use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
@@ -15,17 +15,17 @@ use crate::fiber::{
     PaymentCustomRecords, PaymentSession, PaymentStatus, Privkey, Pubkey, PublicChannelInfo,
     RevocationData, SendPaymentData, SettlementData, SigningCommitmentFlags, TimedResult,
 };
+use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+use crate::store::open_store;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::store::Store;
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -241,12 +241,125 @@ fn test_store_save_node_announcement() {
     assert_eq!(new_node_announcement, Some(node_announcement));
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_get_latest_startup_broadcast_message_cursor_skips_local_messages_conservatively() {
+    let (store, _dir) = generate_store();
+    let local_signer = gen_rand_local_signer();
+    let local_privkey: Privkey = (*local_signer.secret_key()).into();
+    let local_pubkey = local_privkey.pubkey();
+    let remote_signer = gen_rand_local_signer();
+    let remote_privkey: Privkey = (*remote_signer.secret_key()).into();
+    let remote_pubkey = remote_privkey.pubkey();
+    let remote_peer_signer = gen_rand_local_signer();
+    let remote_peer_pubkey: Pubkey = (*remote_peer_signer.pubkey()).into();
+    let announcement_signer = gen_rand_local_signer();
+    let x_only_pubkey = announcement_signer.x_only_pub_key();
+
+    let local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        10,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(local_node_announcement.clone());
+
+    let local_channel_outpoint = gen_rand_channel_outpoint();
+    let local_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &local_pubkey,
+        &remote_pubkey,
+        local_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(20, local_channel_announcement);
+    store.save_channel_update(new_channel_update_unsigned(
+        local_channel_outpoint,
+        30,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let remote_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("remote").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &remote_privkey,
+        get_chain_hash(),
+        40,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(remote_node_announcement);
+
+    let remote_channel_outpoint = gen_rand_channel_outpoint();
+    let remote_channel_announcement = ChannelAnnouncement::new_unsigned(
+        &remote_pubkey,
+        &remote_peer_pubkey,
+        remote_channel_outpoint.clone(),
+        get_chain_hash(),
+        &x_only_pubkey,
+        0,
+        None,
+    );
+    store.save_channel_announcement(50, remote_channel_announcement);
+    let remote_channel_update = new_channel_update_unsigned(
+        remote_channel_outpoint,
+        60,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    );
+    store.save_channel_update(remote_channel_update.clone());
+
+    store.save_channel_update(new_channel_update_unsigned(
+        gen_rand_channel_outpoint(),
+        70,
+        ChannelUpdateMessageFlags::UPDATE_OF_NODE1,
+        ChannelUpdateChannelFlags::empty(),
+        1,
+        1,
+        1,
+    ));
+
+    let newer_local_node_announcement = NodeAnnouncement::new_signed(
+        AnnouncedNodeName::from_string("local").expect("invalid name"),
+        FeatureVector::default(),
+        vec![],
+        &local_privkey,
+        get_chain_hash(),
+        80,
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    store.save_node_announcement(newer_local_node_announcement);
+
+    assert_eq!(
+        get_latest_startup_broadcast_message_cursor(&store, Some(&local_pubkey)),
+        remote_channel_update.cursor()
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let channel_id = gen_rand_sha256_hash();
@@ -325,7 +438,7 @@ fn test_store_watchtower() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
     let preimage_a = gen_rand_sha256_hash();
@@ -389,7 +502,7 @@ fn test_store_watchtower_preimage() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_watchtower_with_wrong_node_id() {
     let path = TempDir::new("test-watchtower-store");
-    let store = Store::new(path).expect("created store failed");
+    let store = open_store(path).expect("created store failed");
 
     let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
     let wrong_node_id = NodeId::from_bytes(PeerId::random().into_bytes());
@@ -481,6 +594,7 @@ fn test_channel_actor_state_store() {
     );
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
+    let channel_id = gen_rand_sha256_hash();
 
     let state = ChannelActorState {
         core: ChannelActorData {
@@ -518,7 +632,7 @@ fn test_channel_actor_state_store() {
             commitment_fee_rate: 100,
             commitment_delay_epoch: 100,
             funding_fee_rate: 100,
-            id: gen_rand_sha256_hash(),
+            id: channel_id,
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
@@ -552,16 +666,25 @@ fn test_channel_actor_state_store() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             last_revoke_ack_msg: None,
+            pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
+                channel_id,
+                tlc_id: 1,
+                amount: 1000,
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: 1200,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                onion_packet: None,
+            })],
+            last_was_revoke: true,
             created_at: SystemTime::now(),
         },
-        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
-        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -571,13 +694,18 @@ fn test_channel_actor_state_store() {
 
     let path = TempDir::new("channel_actore_store");
 
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
 
-    let get_state = store.get_channel_actor_state(&state.id);
-    assert!(get_state.is_some());
-    assert!(!get_state.unwrap().is_tlc_forwarding_enabled());
+    let get_state = store.get_channel_actor_state(&state.id).unwrap();
+    assert!(!get_state.is_tlc_forwarding_enabled());
+    assert_eq!(get_state.pending_replay_updates.len(), 1);
+    assert!(matches!(
+        get_state.pending_replay_updates.first(),
+        Some(TlcReplayUpdate::Add(add)) if add.channel_id == channel_id && add.tlc_id == 1
+    ));
+    assert_eq!(get_state.last_was_revoke, state.last_was_revoke);
 
     let remote_pubkey = state.get_remote_pubkey();
     assert_eq!(
@@ -681,16 +809,17 @@ fn test_serde_channel_actor_state_ciborium() {
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
             last_revoke_ack_msg: None,
+            pending_replay_updates: vec![],
+            last_was_revoke: false,
             created_at: SystemTime::now(),
         },
-        pending_replay_updates: vec![],
         waiting_peer_response: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
-        last_was_revoke: false,
         ephemeral_config: Default::default(),
         private_key: None,
     };
@@ -950,21 +1079,17 @@ struct StoreChangeSaver {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl crate::store::store_impl::StoreChangeWatcher for StoreChangeSaver {
-    fn on_store_change(&self, change: crate::store::store_impl::StoreChange) {
-        self.changes.write().unwrap().push(change);
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_change_watcher() {
     use crate::store::store_impl::StoreChange;
     use std::sync::Arc;
 
     let (mut store, _dir) = generate_store();
-    let watcher = Arc::new(StoreChangeSaver::default());
-    store.set_watcher(watcher.clone());
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
 
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -980,7 +1105,7 @@ fn test_store_change_watcher() {
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
 
-    let changes = watcher.changes.read().unwrap();
+    let changes = saver.changes.read().unwrap();
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutCkbInvoiceStatus { payment_hash: h, invoice_status: CkbInvoiceStatus::Open } if h == &payment_hash)
     ));
@@ -996,7 +1121,7 @@ fn test_store_sample_channel_actor_state() {
     assert!(!samples.is_empty());
 
     let path = TempDir::new("sample_channel_actor_state_store");
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
 
     // Insert all samples
     for sample in &samples {
@@ -1064,7 +1189,7 @@ fn test_store_channel_open_record() {
     assert!(!samples.is_empty());
 
     let path = TempDir::new("channel_open_record_store");
-    let store = Store::new(path).expect("create store failed");
+    let store = open_store(path).expect("create store failed");
 
     // Initially no records
     assert!(store.get_channel_open_records().is_empty());

@@ -5,7 +5,7 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
-NATIVE_PACKAGES = -p fnn -p fiber-bin
+NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -p fiber-json-types
 WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common
 
 .PHONY: build-metrics-prof
@@ -15,12 +15,14 @@ build-metrics-prof:
 .PHONY: test
 test:
 	RUST_LOG=off cargo nextest run --no-fail-fast $(NATIVE_PACKAGES)
+	RUST_LOG=off cargo nextest run --no-fail-fast --no-default-features --features sqlite $(NATIVE_PACKAGES)
 
 .PHONY: check
 check:
 	cargo check --locked
 	cargo check --release --locked
-	cargo check --package fnn --no-default-features
+	cargo check --package fnn --no-default-features --features rocksdb
+	cargo check --no-default-features --features sqlite $(NATIVE_PACKAGES)
 	rustup target add wasm32-unknown-unknown
 	cargo check --target wasm32-unknown-unknown -p fiber-types --all-features
 	cd migrate && cargo check --locked
@@ -28,6 +30,7 @@ check:
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --all-features $(NATIVE_PACKAGES) -- -D warnings
+	cargo clippy --no-default-features --features sqlite $(NATIVE_PACKAGES) -- -D warnings
 	cargo clippy $(WASM_PACKAGES) --target wasm32-unknown-unknown -- -D warnings
 
 .PHONY: bless
@@ -72,14 +75,14 @@ coverage-generate-report:
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 
-RPC_GEN_VERSION = 0.1.18
+RPC_GEN_VERSION = 0.1.21
 .PHONY: gen-rpc-doc
 gen-rpc-doc:
 	@if ! command -v fiber-rpc-gen >/dev/null 2>&1 || [ "$$(fiber-rpc-gen --version | awk '{print $$2}')" != "$(RPC_GEN_VERSION)" ]; then \
         echo "Installing fiber-rpc-gen $(RPC_GEN_VERSION)..."; \
         cargo install fiber-rpc-gen --version $(RPC_GEN_VERSION) --force; \
 	fi
-	fiber-rpc-gen ./crates/fiber-lib/src/ --extra-types-dir ./crates/fiber-types/src/
+	fiber-rpc-gen ./crates/fiber-lib/src/ --extra-types-dir ./crates/fiber-types/src/ --json-types-dir ./crates/fiber-json-types/src/ --exclude-modules utils
 	if grep -q "TODO: add desc" ./crates/fiber-lib/src/rpc/README.md; then \
         echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
 		exit 1; \

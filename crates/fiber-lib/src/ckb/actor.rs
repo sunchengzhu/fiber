@@ -70,8 +70,7 @@ pub enum CkbChainMessage {
     Stop,
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
@@ -235,7 +234,6 @@ impl Actor for CkbChainActor {
 impl CkbChainState {
     fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
         FundingContext {
-            signer: self.signer.clone(),
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_cell_lock_script,

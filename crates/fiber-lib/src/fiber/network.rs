@@ -55,7 +55,10 @@ use super::channel::{
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
 };
-use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
+use super::gossip::{
+    get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
+    GossipMessageUpdates,
+};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
@@ -92,6 +95,7 @@ use crate::invoice::{
 use crate::utils::{actor::ActorHandleLogGuard, payment::is_invoice_fulfilled};
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
@@ -156,6 +160,61 @@ const CHECK_PEER_INIT_INTERVAL: Duration = Duration::from_secs(20);
 // and the latest cursor.
 const MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT: Duration =
     Duration::from_secs(60 * 60 * 2);
+
+/// Maximum number of tries for a single funding step (initial try plus follow-up attempts after
+/// transient failures). `retry_count` passed to handlers is zero-based (0 = first try).
+const FUNDING_RETRY_MAX_TOTAL_ATTEMPTS: u32 = 5;
+const FUNDING_RETRY_BASE_MILLIS: u64 = 2000;
+const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
+
+fn funding_retry_delay(retry_count: u32) -> Duration {
+    let shift = retry_count.min(63);
+    let factor = 1u64 << shift;
+    let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(factor);
+    Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
+}
+
+/// Handles a `FundingError` with retry logic.  If the error is temporary and
+/// retries remain, schedules a delayed retry via `send_after` using the
+/// provided `retry_msg_fn` and returns `false`.  Otherwise logs the exhaustion
+/// and returns `true` so the caller can perform its own abort.
+fn schedule_funding_retry(
+    myself: &ActorRef<NetworkActorMessage>,
+    err: &FundingError,
+    retry_count: u32,
+    channel_id: Hash256,
+    operation: &str,
+    retry_msg_fn: impl FnOnce(u32) -> NetworkActorCommand + Send + 'static,
+) -> bool {
+    let attempt = retry_count + 1;
+    error!(
+        "Failed to {} (attempt {}/{}): {}",
+        operation, attempt, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, err
+    );
+    if err.is_temporary() && attempt < FUNDING_RETRY_MAX_TOTAL_ATTEMPTS {
+        let delay = funding_retry_delay(retry_count);
+        warn!(
+            "Temporary {} error, scheduling retry in {:?} (next attempt {}/{})",
+            operation,
+            delay,
+            attempt + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS
+        );
+        let myself = myself.clone();
+        myself.send_after(delay, move || {
+            NetworkActorMessage::new_command(retry_msg_fn(retry_count + 1))
+        });
+        false
+    } else {
+        if err.is_temporary() {
+            error!(
+                "Exhausted {} attempts for {}, aborting channel {:?}",
+                FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, operation, channel_id
+            );
+        }
+        true
+    }
+}
 
 static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
 
@@ -282,10 +341,14 @@ pub struct SendOnionPacketCommand {
 pub enum NetworkActorCommand {
     /// Network commands
     // Connect to a peer, and optionally also save the peer to the peer store.
-    ConnectPeer(Multiaddr, bool),
+    ConnectPeer(Multiaddr, bool, Option<RpcReplyPort<Result<(), String>>>),
     // Connect to a peer via pubkey, resolving address from local graph/saved state.
     ConnectPeerWithPubkey(Pubkey, RpcReplyPort<Result<(), String>>),
-    DisconnectPeer(Pubkey, PeerDisconnectReason),
+    DisconnectPeer(
+        Pubkey,
+        PeerDisconnectReason,
+        Option<RpcReplyPort<Result<(), String>>>,
+    ),
     // Save the address of a peer to the peer store, the address here must be a valid
     // multiaddr with the peer id.
     SavePeerAddress(Multiaddr),
@@ -332,9 +395,11 @@ pub enum NetworkActorCommand {
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     SignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    RetryUpdateChannelFunding(Hash256, Transaction, FundingRequest, u32),
+    RetrySignFundingTx(Pubkey, Hash256, Transaction, Option<Vec<Vec<u8>>>, u32),
     NotifyFundingTx(Transaction),
     CheckChannelsShutdown,
-    CheckChannelShutdown(Hash256),
+    CheckChannelShutdown(Hash256, RpcReplyPort<Result<(), String>>),
     RemoteForceShutdownChannel(Hash256, Option<GetShutdownTxResponse>),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessageWithTimestamp>),
@@ -406,18 +471,6 @@ pub struct OpenChannelCommand {
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
-}
-
-/// A hop requirement need to meet when building router, do not including the source node,
-/// the last hop is the target node.
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HopRequire {
-    /// The public key of the node
-    pub(crate) pubkey: Pubkey,
-    /// The outpoint for the channel, which means use channel with `channel_outpoint` to reach this node
-    #[serde_as(as = "Option<EntityHex>")]
-    pub(crate) channel_outpoint: Option<OutPoint>,
 }
 
 #[serde_as]
@@ -1090,13 +1143,25 @@ where
             NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget { target, message }) => {
                 state.send_fiber_message_to_pubkey(&target, message).await?;
             }
-            NetworkActorCommand::ConnectPeer(addr, save) => {
+            NetworkActorCommand::ConnectPeer(addr, save, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 if save {
                     state.enqueue_peer_address_to_save(addr.clone());
                 }
-                state.control.dial(addr, TargetProtocol::All).await?;
+                match state.control.dial(addr, TargetProtocol::All).await {
+                    Ok(()) => {
+                        if let Some(reply) = rpc_reply {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(reply) = rpc_reply {
+                            let _ = reply.send(Err(err.to_string()));
+                        }
+                        return Err(err.into());
+                    }
+                }
 
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
@@ -1120,13 +1185,18 @@ where
                     }
                 }
             }
-            NetworkActorCommand::DisconnectPeer(pubkey, reason) => {
+            NetworkActorCommand::DisconnectPeer(pubkey, reason, reply) => {
                 if let Some(session) = state.peer_session_map.get(&pubkey).map(|p| p.session_id) {
                     debug!(
                         "Disconnecting peer {:?} session w {:?}ith reason {:?}",
                         &pubkey, &session, &reason
                     );
                     state.control.disconnect(session).await?;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(()));
+                    }
+                } else if let Some(reply) = reply {
+                    let _ = reply.send(Err(format!("peer {:?} is not connected", pubkey)));
                 }
             }
             NetworkActorCommand::SavePeerAddress(addr) => {
@@ -1152,45 +1222,20 @@ where
                     if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                         myself
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.to_owned(), false),
+                                NetworkActorCommand::ConnectPeer(addr.to_owned(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
                 }
 
-                let mut inbound_peer_sessions = state.inbound_peer_sessions();
-                let num_inbound_peers = inbound_peer_sessions.len();
+                let inbound_no_channel_peers = state.inbound_no_channel_peers_in_connected_order();
+                let num_inbound_no_channel_peers = inbound_no_channel_peers.len();
                 let num_outbound_peers = state.num_of_outbound_peers();
 
-                debug!("Maintaining network connections ticked: current num inbound peers {}, current num outbound peers {}", num_inbound_peers, num_outbound_peers);
-
-                if num_inbound_peers > state.max_inbound_peers {
-                    debug!(
-                                "Already connected to {} inbound peers, only wants {} peers, disconnecting some",
-                                num_inbound_peers, state.max_inbound_peers
-                            );
-                    inbound_peer_sessions.retain(|k| !state.session_channels_map.contains_key(k));
-                    let sessions_to_disconnect = if inbound_peer_sessions.len()
-                        < num_inbound_peers - state.max_inbound_peers
-                    {
-                        warn!(
-                                    "Wants to disconnect more {} inbound peers, but all peers except {:?} have channels, will not disconnect any peer with channels",
-                                    num_inbound_peers - state.max_inbound_peers, &inbound_peer_sessions
-                                );
-                        &inbound_peer_sessions[..]
-                    } else {
-                        &inbound_peer_sessions[..num_inbound_peers - state.max_inbound_peers]
-                    };
-                    debug!(
-                        "Disconnecting inbound peer sessions {:?}",
-                        sessions_to_disconnect
-                    );
-                    for session in sessions_to_disconnect {
-                        if let Err(err) = state.control.disconnect(*session).await {
-                            error!("Failed to disconnect session: {}", err);
-                        }
-                    }
-                }
+                debug!(
+                    "Maintaining network connections ticked: current num inbound no-channel peers {}, current num outbound peers {}",
+                    num_inbound_no_channel_peers, num_outbound_peers
+                );
 
                 if num_outbound_peers >= state.min_outbound_peers {
                     debug!(
@@ -1245,7 +1290,7 @@ where
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false),
+                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1266,7 +1311,7 @@ where
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone(), false),
+                                NetworkActorCommand::ConnectPeer(addr.clone(), false, None),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
@@ -1284,6 +1329,7 @@ where
                                 NetworkActorCommand::DisconnectPeer(
                                     pubkey,
                                     PeerDisconnectReason::InitMessageTimeout,
+                                    None,
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -1721,40 +1767,7 @@ where
                 }
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
-                let old_tx = transaction.into_view();
-                let mut tx = FundingTx::new();
-                tx.update_for_self(old_tx);
-                let tx = match self.fund(tx, request).await {
-                    Ok(tx) => match tx.into_inner() {
-                        Some(tx) => tx,
-                        _ => {
-                            error!("Obtained empty funding tx");
-                            return Ok(());
-                        }
-                    },
-                    Err(err) => {
-                        error!("Failed to fund channel: {}", err);
-                        if !err.is_temporary() {
-                            state.abort_funding(Either::Left(channel_id)).await;
-                        }
-                        return Ok(());
-                    }
-                };
-                if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG)
-                {
-                    let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
-                    let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
-                    debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part: {}", tx_json);
-                }
-                state
-                    .send_command_to_channel(
-                        channel_id,
-                        ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
-                            TxUpdateCommand {
-                                transaction: tx.data(),
-                            },
-                        )),
-                    )
+                self.do_update_channel_funding(&myself, state, channel_id, 0, transaction, request)
                     .await?
             }
             NetworkActorCommand::VerifyFundingTx {
@@ -1779,143 +1792,61 @@ where
             }
             NetworkActorCommand::SignFundingTx(
                 target,
-                ref channel_id,
+                channel_id,
                 funding_tx,
                 partial_witnesses,
             ) => {
-                let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
-
-                // Check if we have partial witnesses before moving them
-                let has_partial_witnesses = partial_witnesses.is_some();
-
-                // Prepare funding transaction with partial witnesses if provided
-                let funding_tx = match partial_witnesses {
-                    Some(partial_witnesses) => {
-                        debug!(
-                            "Received SignFudningTx request with for transaction {:?} and partial witnesses {:?}",
-                            &funding_tx,
-                            partial_witnesses
-                                .iter()
-                                .map(hex::encode)
-                                .collect::<Vec<_>>()
-                        );
-                        funding_tx
-                            .into_view()
-                            .as_advanced_builder()
-                            .set_witnesses(
-                                partial_witnesses.into_iter().map(|x| x.pack()).collect(),
-                            )
-                            .build()
-                    }
-                    None => {
-                        debug!(
-                            "Received SignFundingTx request with for transaction {:?} without partial witnesses, so start signing it now",
-                            &funding_tx,
-                        );
-                        funding_tx.into_view()
-                    }
-                };
-
-                // Sign the funding transaction
-                let mut signed_funding_tx = match call_t!(
-                    self.chain_actor,
-                    CkbChainMessage::Sign,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    funding_tx.into()
-                )
-                .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                {
-                    Ok(funding_tx) => funding_tx,
-                    Err(err) => {
-                        error!("Failed to sign funding transaction: {}", err);
-                        // Send TxAbort message to peer
-                        let abort_msg = FiberMessageWithTarget {
-                            target,
-                            message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelMessage::TxAbort(TxAbort {
-                                    channel_id: *channel_id,
-                                    message: format!("Failed to sign funding transaction: {}", err)
-                                        .as_bytes()
-                                        .to_vec(),
-                                }),
-                            ),
-                        };
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(abort_msg),
-                            ))
-                            .expect("network actor alive");
-                        // Abort funding and close the channel
-                        state.abort_funding(Either::Left(*channel_id)).await;
-                        return Ok(());
-                    }
-                };
-                debug!("Funding transaction signed: {:?}", &signed_funding_tx);
-
-                // Extract signed transaction and witnesses
-                let funding_tx = signed_funding_tx.take().expect("take tx");
-                let witnesses = funding_tx.witnesses();
-
-                // If we received partial witnesses, the transaction is fully signed
-                // and we should notify that it's pending confirmation
-                if has_partial_witnesses {
-                    let outpoint = funding_tx
-                        .output_pts_iter()
-                        .next()
-                        .expect("funding tx output exists");
-
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionPending(
-                                funding_tx.data(),
-                                outpoint,
-                                *channel_id,
-                            ),
-                        ))
-                        .expect("network actor alive");
-                    debug!("Fully signed funding tx {:?}", &funding_tx);
-                } else {
-                    debug!("Partially signed funding tx {:?}", &funding_tx);
-                }
-
-                // Create the message to send to peer
-                let msg = FiberMessageWithTarget {
+                debug!(
+                    "Received SignFundingTx request for transaction {:?} (has_partial_witnesses={})",
+                    &funding_tx,
+                    partial_witnesses.is_some()
+                );
+                self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    0,
                     target,
-                    message: FiberMessage::ChannelNormalOperation(
-                        FiberChannelMessage::TxSignatures(TxSignatures {
-                            channel_id: *channel_id,
-                            witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                        }),
-                    ),
-                };
-
-                // Before sending the signatures to the peer, start tracing the tx
-                // It should be the first time to trace the tx
-                state
-                    .trace_tx(tx_hash, InFlightCkbTxKind::Funding(*channel_id))
-                    .await?;
-
-                // Notify channel actor to save the signatures
-                if let Err(err) = state
-                    .send_command_to_channel(
-                        *channel_id,
-                        ChannelCommand::FundingTxSigned(funding_tx.data()),
-                    )
-                    .await
-                {
-                    error!(
-                        "Failed to update signed funding tx {:?}: {}",
-                        channel_id, err
-                    );
-                }
-
-                myself
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(msg),
-                    ))
-                    .expect("network actor alive");
+                    funding_tx,
+                    partial_witnesses,
+                )
+                .await?
             }
-            NetworkActorCommand::CheckChannelShutdown(channel_id) => {
+            NetworkActorCommand::RetryUpdateChannelFunding(
+                channel_id,
+                transaction,
+                request,
+                retry_count,
+            ) => {
+                self.do_update_channel_funding(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    transaction,
+                    request,
+                )
+                .await?
+            }
+            NetworkActorCommand::RetrySignFundingTx(
+                target,
+                channel_id,
+                funding_tx,
+                partial_witnesses,
+                retry_count,
+            ) => {
+                self.do_sign_funding_tx(
+                    &myself,
+                    state,
+                    channel_id,
+                    retry_count,
+                    target,
+                    funding_tx,
+                    partial_witnesses,
+                )
+                .await?
+            }
+            NetworkActorCommand::CheckChannelShutdown(channel_id, rpc_reply) => {
                 if let Some(channel_state) = self.store.get_channel_actor_state(&channel_id) {
                     let funding_lock_script =
                         state.get_cached_channel_funding_lock_script(channel_id, &channel_state);
@@ -1931,10 +1862,12 @@ where
                         )
                         .await;
                     });
+                    let _ = rpc_reply.send(Ok(()));
                 } else {
                     tracing::debug!(
                         "stop check channel shutdown, can't find {channel_id:?} actor state"
                     );
+                    let _ = rpc_reply.send(Err(format!("Channel not found: {:?}", channel_id)));
                 }
             }
             NetworkActorCommand::RemoteForceShutdownChannel(channel_id, response) => {
@@ -2869,6 +2802,213 @@ where
         Ok(PaymentRouter { router_hops })
     }
 
+    /// Core logic for funding a channel transaction and sending the TxUpdate.
+    /// Used by both `UpdateChannelFunding` (retry_count=0) and
+    /// `RetryUpdateChannelFunding` (retry_count>0).
+    async fn do_update_channel_funding(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        retry_count: u32,
+        transaction: Transaction,
+        request: FundingRequest,
+    ) -> crate::Result<()> {
+        let tx_for_retry = transaction.clone();
+        let request_for_retry = request.clone();
+        let old_tx = transaction.into_view();
+        let mut tx = FundingTx::new();
+        tx.update_for_self(old_tx);
+        let tx = match self.fund(tx, request).await {
+            Ok(tx) => match tx.into_inner() {
+                Some(tx) => tx,
+                _ => {
+                    error!("Obtained empty funding tx (attempt {})", retry_count + 1);
+                    return Ok(());
+                }
+            },
+            Err(err) => {
+                let should_abort = schedule_funding_retry(
+                    myself,
+                    &err,
+                    retry_count,
+                    channel_id,
+                    "fund channel",
+                    move |next| {
+                        NetworkActorCommand::RetryUpdateChannelFunding(
+                            channel_id,
+                            tx_for_retry,
+                            request_for_retry,
+                            next,
+                        )
+                    },
+                );
+                if should_abort {
+                    state.abort_funding(Either::Left(channel_id)).await;
+                }
+                return Ok(());
+            }
+        };
+        if tracing::enabled!(target: "fnn::fiber::network::funding", tracing::Level::DEBUG) {
+            let tx_json: ckb_jsonrpc_types::Transaction = tx.data().into();
+            let tx_json = serde_json::to_string(&tx_json).unwrap_or_default();
+            debug!(target: "fnn::fiber::network::funding", "Funding transaction updated on our part (attempt {}/{}): {}", retry_count + 1, FUNDING_RETRY_MAX_TOTAL_ATTEMPTS, tx_json);
+        }
+        state
+            .send_command_to_channel(
+                channel_id,
+                ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
+                    TxUpdateCommand {
+                        transaction: tx.data(),
+                    },
+                )),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Core logic for signing a funding transaction and sending TxSignatures.
+    /// Used by both `SignFundingTx` (retry_count=0) and
+    /// `RetrySignFundingTx` (retry_count>0).
+    #[allow(clippy::too_many_arguments)]
+    async fn do_sign_funding_tx(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        retry_count: u32,
+        target: Pubkey,
+        funding_tx: Transaction,
+        partial_witnesses: Option<Vec<Vec<u8>>>,
+    ) -> crate::Result<()> {
+        let tx_hash: Hash256 = funding_tx.calc_tx_hash().into();
+        let has_partial_witnesses = partial_witnesses.is_some();
+
+        let funding_tx_for_retry = funding_tx.clone();
+        let partial_witnesses_for_retry = partial_witnesses.clone();
+
+        let funding_tx = match partial_witnesses {
+            Some(partial_witnesses) => funding_tx
+                .into_view()
+                .as_advanced_builder()
+                .set_witnesses(partial_witnesses.into_iter().map(|x| x.pack()).collect())
+                .build(),
+            None => funding_tx.into_view(),
+        };
+
+        let mut signed_funding_tx = match call_t!(
+            self.chain_actor,
+            CkbChainMessage::Sign,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            funding_tx.into()
+        )
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+        {
+            Ok(funding_tx) => funding_tx,
+            Err(err) => {
+                let should_abort = schedule_funding_retry(
+                    myself,
+                    &err,
+                    retry_count,
+                    channel_id,
+                    "sign funding transaction",
+                    move |next| {
+                        NetworkActorCommand::RetrySignFundingTx(
+                            target,
+                            channel_id,
+                            funding_tx_for_retry,
+                            partial_witnesses_for_retry,
+                            next,
+                        )
+                    },
+                );
+                if should_abort {
+                    let abort_msg = FiberMessageWithTarget {
+                        target,
+                        message: FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::TxAbort(TxAbort {
+                                channel_id,
+                                message: format!("Failed to sign funding transaction: {}", err)
+                                    .as_bytes()
+                                    .to_vec(),
+                            }),
+                        ),
+                    };
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(abort_msg),
+                        ))
+                        .expect("network actor alive");
+                    state.abort_funding(Either::Left(channel_id)).await;
+                }
+                return Ok(());
+            }
+        };
+        debug!(
+            "Funding transaction signed (attempt {}/{}): {:?}",
+            retry_count + 1,
+            FUNDING_RETRY_MAX_TOTAL_ATTEMPTS,
+            &signed_funding_tx
+        );
+
+        let funding_tx = signed_funding_tx.take().expect("take tx");
+        let witnesses = funding_tx.witnesses();
+
+        if has_partial_witnesses {
+            let outpoint = funding_tx
+                .output_pts_iter()
+                .next()
+                .expect("funding tx output exists");
+
+            myself
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::FundingTransactionPending(
+                        funding_tx.data(),
+                        outpoint,
+                        channel_id,
+                    ),
+                ))
+                .expect("network actor alive");
+            debug!("Fully signed funding tx {:?}", &funding_tx);
+        } else {
+            debug!("Partially signed funding tx {:?}", &funding_tx);
+        }
+
+        let msg = FiberMessageWithTarget {
+            target,
+            message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
+                TxSignatures {
+                    channel_id,
+                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                },
+            )),
+        };
+
+        state
+            .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
+            .await?;
+
+        if let Err(err) = state
+            .send_command_to_channel(
+                channel_id,
+                ChannelCommand::FundingTxSigned(funding_tx.data()),
+            )
+            .await
+        {
+            error!(
+                "Failed to update signed funding tx {:?}: {}",
+                channel_id, err
+            );
+        }
+
+        myself
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(msg),
+            ))
+            .expect("network actor alive");
+        Ok(())
+    }
+
     async fn fund(
         &self,
         tx: FundingTx,
@@ -3589,11 +3729,56 @@ where
         return Ok(());
     }
 
-    fn inbound_peer_sessions(&self) -> Vec<SessionId> {
-        self.peer_session_map
-            .values()
-            .filter_map(|s| (s.session_type == SessionType::Inbound).then_some(s.session_id))
-            .collect()
+    fn session_has_channels(&self, session_id: &SessionId) -> bool {
+        self.session_channels_map
+            .get(session_id)
+            .is_some_and(|channels| !channels.is_empty())
+    }
+
+    fn inbound_no_channel_peers_in_connected_order(&self) -> Vec<(Pubkey, SessionId)> {
+        let mut peers = self
+            .peer_session_map
+            .iter()
+            .filter_map(|(pubkey, peer)| {
+                (peer.session_type == SessionType::Inbound
+                    && !self.session_has_channels(&peer.session_id))
+                .then_some((*pubkey, peer.session_id))
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|(_, session_id)| *session_id);
+        peers
+    }
+
+    async fn enforce_inbound_peer_budget(&mut self) {
+        let inbound_no_channel_peers = self.inbound_no_channel_peers_in_connected_order();
+        if inbound_no_channel_peers.len() <= self.max_inbound_peers {
+            return;
+        }
+        let excess_peers = inbound_no_channel_peers.len() - self.max_inbound_peers;
+
+        for (pubkey, session_id) in inbound_no_channel_peers.into_iter().take(excess_peers) {
+            debug!(
+                "Disconnecting inbound no-channel peer {:?} on session {:?} immediately after connect",
+                pubkey, session_id
+            );
+            match self.control.disconnect(session_id).await {
+                Ok(()) => {
+                    if matches!(
+                        self.peer_session_map.get(&pubkey),
+                        Some(peer) if peer.session_id == session_id
+                    ) {
+                        self.peer_session_map.remove(&pubkey);
+                    }
+                    self.session_channels_map.remove(&session_id);
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to disconnect inbound no-channel peer {:?} on session {:?}: {}",
+                        pubkey, session_id, err
+                    );
+                }
+            }
+        }
     }
 
     fn num_of_outbound_peers(&self) -> usize {
@@ -3867,6 +4052,18 @@ where
             }
         }
 
+        self.enforce_inbound_peer_budget().await;
+        if !matches!(
+            self.peer_session_map.get(&remote_pubkey),
+            Some(peer) if peer.session_id == session.id
+        ) {
+            debug!(
+                "Peer {:?} session {:?} was disconnected by inbound peer admission control",
+                remote_pubkey, session.id
+            );
+            return;
+        }
+
         if self.auto_announce {
             let message = self.get_or_create_new_node_announcement_message();
             debug!(
@@ -4134,6 +4331,7 @@ where
                     NetworkActorCommand::DisconnectPeer(
                         peer_pubkey,
                         PeerDisconnectReason::ChainHashMismatch,
+                        None,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -4419,8 +4617,7 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl<S, C> Actor for NetworkActor<S, C>
 where
     S: NetworkActorStateStore
@@ -4483,12 +4680,11 @@ where
             )
             .await;
 
-            let graph_subscribing_cursor = {
-                let graph = self.network_graph.write().await;
-                graph
-                    .get_latest_cursor()
-                    .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
-            };
+            let graph_subscribing_cursor = get_latest_startup_broadcast_message_cursor(
+                &self.store,
+                Some(&private_key.pubkey()),
+            )
+            .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
             gossip_service
                 .get_subscriber()
@@ -4697,7 +4893,7 @@ where
                 Ok(addr) => {
                     myself
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ConnectPeer(addr, false),
+                            NetworkActorCommand::ConnectPeer(addr, false, None),
                         ))
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
