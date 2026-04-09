@@ -1,5 +1,7 @@
 # Public Nodes User Manual
 
+> **Version note:** This document is for fnn `v0.8.0` and later. It is **not** compatible with earlier versions (e.g. `v0.7.1`), because [PR #1154](https://github.com/nervosnetwork/fiber/pull/1154) replaced `PeerId` with `Pubkey` across all RPC interfaces — the `peer_id` parameter in `connect_peer`, `open_channel`, `list_channels`, etc. was renamed to `pubkey`.
+
 ## Public Nodes
 
 ### Mainnet
@@ -145,7 +147,7 @@ For example, if nodeA funds 499 CKB and the public node contributes 250 CKB:
 
    **Mainnet**
 
-   Transfer CKB to both nodeA's and nodeB's addresses. Each node needs enough CKB to open a channel (at least 499 CKB per node).
+   Transfer CKB to both nodeA's and nodeB's addresses. Each node needs enough CKB to open a channel. The funding amount is 499 CKB, but additional CKB is required for the change cell (a standard secp256k1-blake160 cell occupies a minimum of 61 CKB) and the on-chain funding transaction fee. We recommend transferring at least 561 CKB per node (499 + 61 + 1 fee).
 
    **Testnet**
 
